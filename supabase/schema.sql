@@ -113,3 +113,30 @@ CREATE POLICY "Form owners can view transcripts" ON transcripts FOR SELECT USING
     WHERE responses.id = transcripts.response_id AND forms.user_id = auth.uid()
   )
 );
+
+-- user_keys table
+CREATE TABLE user_keys (
+  user_id uuid PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  gemini_key text,
+  groq_key text,
+  created_at timestamp with time zone DEFAULT now(),
+  updated_at timestamp with time zone DEFAULT now()
+);
+
+ALTER TABLE user_keys ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Users can manage their own keys" ON user_keys FOR ALL USING (auth.uid() = user_id);
+
+-- Trigger for automatically creating a public.user record
+CREATE OR REPLACE FUNCTION public.handle_new_user() 
+RETURNS trigger AS $$
+BEGIN
+  INSERT INTO public.users (id, email)
+  VALUES (new.id, new.email);
+  RETURN new;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE PROCEDURE public.handle_new_user();
+
