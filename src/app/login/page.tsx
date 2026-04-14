@@ -2,17 +2,18 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { loginWithPassword } from '@/lib/actions/auth'
+import { authenticateWithPassword } from '@/lib/actions/auth'
 import { Sparkles } from 'lucide-react'
 
 export default function LoginPage() {
   const router = useRouter()
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [message, setMessage] = useState('')
+  const [mode, setMode] = useState<'login' | 'signup'>('login')
 
   async function actionName(formData: FormData) {
     setStatus('loading')
-    const res = await loginWithPassword(formData)
+    const res = await authenticateWithPassword(formData)
     if (res?.error) {
       setStatus('error')
       setMessage(res.error)
@@ -30,10 +31,10 @@ export default function LoginPage() {
           <Sparkles className="h-12 w-12" />
         </div>
         <h2 className="mt-6 text-center text-3xl font-serif font-medium tracking-tight text-foreground">
-          Sign in to Voca
+          {mode === 'login' ? 'Sign in to Voca' : 'Create an Account'}
         </h2>
         <p className="mt-2 text-center text-sm text-foreground/60">
-          Enter an email and password. If you don't have an account, we'll create one instantly.
+          {mode === 'login' ? 'Enter your email and password to access your dashboard.' : 'Enter an email and password to instantly create your account.'}
         </p>
       </div>
 
@@ -45,6 +46,7 @@ export default function LoginPage() {
                 Email address
               </label>
               <div className="mt-2">
+                <input type="hidden" name="mode" value={mode} />
                 <input
                   id="email"
                   name="email"
@@ -79,7 +81,21 @@ export default function LoginPage() {
                 disabled={status === 'loading'}
                 className="flex w-full justify-center rounded-full bg-accent-amber px-6 py-3 text-sm font-semibold text-black shadow-sm hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-amber disabled:opacity-50 transition-all font-sans"
               >
-                {status === 'loading' ? 'Authenticating...' : 'Sign In / Create Account'}
+                {status === 'loading' ? 'Authenticating...' : (mode === 'login' ? 'Sign In' : 'Sign Up')}
+              </button>
+            </div>
+
+            <div className="text-center mt-2">
+              <button 
+                type="button" 
+                onClick={() => {
+                  setMode(mode === 'login' ? 'signup' : 'login')
+                  setMessage('')
+                  setStatus('idle')
+                }} 
+                className="text-sm font-medium text-accent-amber hover:underline hover:text-accent-amber/80 transition-colors"
+              >
+                {mode === 'login' ? "Don't have an account? Sign up" : "Already have an account? Sign in"}
               </button>
             </div>
             
