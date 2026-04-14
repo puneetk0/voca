@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { CopyLinkButton } from '@/components/admin/CopyLinkButton'
+import { ExportCSVButton } from '@/components/admin/ExportCSVButton'
 import { ArrowLeft, Mic, Keyboard } from 'lucide-react'
 
 export default async function FormDashboard({ params }: { params: Promise<{ id: string }> }) {
@@ -52,9 +53,14 @@ export default async function FormDashboard({ params }: { params: Promise<{ id: 
           <p className="text-foreground/60">{form.description}</p>
         </div>
         
-        <div className="flex flex-col items-start md:items-end gap-2">
+        <div className="flex flex-col items-start md:items-end gap-3">
           <span className="text-xs font-medium uppercase tracking-wider text-foreground/40 pl-2">Share Link</span>
           <CopyLinkButton formId={form.id} />
+          <ExportCSVButton 
+            formId={form.id} 
+            formTitle={form.title}
+            disabled={!responses || responses.length === 0} 
+          />
         </div>
       </div>
 

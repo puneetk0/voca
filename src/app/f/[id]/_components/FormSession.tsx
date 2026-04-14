@@ -3,9 +3,11 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useConversationStore } from '@/lib/store/conversation'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Mic, Keyboard, Send, CheckCircle2, Square, WifiOff } from 'lucide-react'
+import { Mic, Keyboard, Send, CheckCircle2, Square, WifiOff, ExternalLink } from 'lucide-react'
 import { submitResponse } from '@/lib/actions/submit'
 import { useVoiceRecorder } from '@/lib/hooks/useVoiceRecorder'
+import Waveform from '@/components/voice/Waveform'
+import Typewriter, { TypewriterHandle } from '@/components/chat/Typewriter'
 
 type VoiceState = 'idle' | 'thinking' | 'speaking' | 'listening' | 'transcribing' | 'error'
 
@@ -39,12 +41,21 @@ async function fetchConverse(body: object): Promise<{ data?: any; timedOut?: boo
   }
 }
 
-export default function FormSession({ form, fields }: { form: any; fields: any[] }) {
+export default function FormSession({
+  form,
+  fields,
+  prefills = {},
+}: {
+  form: any
+  fields: any[]
+  prefills?: Record<string, string>
+}) {
   const store = useConversationStore()
   const [inputText, setInputText] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const typewriterRef = useRef<TypewriterHandle>(null)
 
   const playChime = () => {
     try {
@@ -67,6 +78,14 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
 
   useEffect(() => {
     store.init(form.id, fields)
+    // Inject URL prefills into the answer store
+    const fieldsByLabel = Object.fromEntries(
+      fields.map(f => [f.label.toLowerCase().trim(), f.id])
+    )
+    Object.entries(prefills).forEach(([key, value]) => {
+      const fieldId = fieldsByLabel[key.toLowerCase().trim()]
+      if (fieldId) store.setAnswer(fieldId, value)
+    })
     return () => window.speechSynthesis.cancel()
   }, [form.id])
 
@@ -94,6 +113,7 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
     fieldIndex: number,
     mode: 'text' | 'voice',
     onSuccess: (aiMessage: string, isComplete: boolean) => void,
+    extraContext?: string,
   ) => {
     store.setIsAiTyping(true)
     store.setConnectionLost(false)
@@ -104,6 +124,7 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
       currentFieldIndex: fieldIndex,
       history: store.history,
       userMessage,
+      ...(extraContext ? { extraContext } : {}),
     })
 
     // 5-second ghost fallback
@@ -153,7 +174,7 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
   }, [form.id, store, fields])
 
   // --- VOICE LOGIC ---
-  const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError } = useVoiceRecorder(
+  const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream } = useVoiceRecorder(
     async (transcript) => {
       store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Voice] ${transcript}` })
       const fieldIndex = store.currentFieldIndex
@@ -183,11 +204,18 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
 
   async function handleInitialSequence(mode: 'text' | 'voice') {
     if (mode === 'voice') setVoiceState('thinking')
+
+    // Build prefill context for first call
+    const prefillEntries = Object.entries(prefills)
+    const prefillNote = prefillEntries.length > 0
+      ? `Note: You already know the following about this user from the URL: ${prefillEntries.map(([k, v]) => `${k}=${v}`).join(', ')}. Acknowledge this naturally and ask for the first MISSING field.`
+      : ''
+
     await handleConverseResponse('Hello', 0, mode, (aiMessage) => {
       if (mode === 'voice') {
         speak(aiMessage, () => { setVoiceState('idle'); startRecording() })
       }
-    })
+    }, prefillNote)
   }
 
   // --- TEXT LOGIC ---
@@ -277,8 +305,10 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
                 initial={{ scale: 0.8 }} animate={{ scale: [1, 1.05, 1] }} transition={{ repeat: Infinity, duration: 1.5 }}
                 className="absolute inset-0 bg-accent-sage rounded-full flex flex-col items-center justify-center shadow-[0_0_40px_rgba(132,204,22,0.3)] hover:scale-95 transition-transform"
               >
-                <Square className="h-10 w-10 text-background fill-background mb-2" />
-                <span className="text-background text-xs font-semibold uppercase tracking-widest">Tap to stop</span>
+                <div className="mb-3">
+                  <Waveform stream={stream} isActive={isRecording} color="#000" />
+                </div>
+                <Square className="h-7 w-7 text-black fill-black" />
               </motion.button>
             )}
             {voiceState === 'speaking' && (
@@ -338,12 +368,21 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
 
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
           <AnimatePresence>
-            {store.history.map((msg) => (
+            {store.history.map((msg, idx) => (
               <motion.div key={msg.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
                 className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
-                <div className={`max-w-[85%] sm:max-w-[75%] p-4 rounded-3xl ${msg.role === 'user' ? 'bg-foreground/[0.05] text-foreground rounded-tr-sm' : 'bg-transparent text-foreground font-serif text-xl sm:text-2xl leading-relaxed py-4'}`}>
-                  {msg.text.replace('[Voice]', '')}
+                <div className={`max-w-[85%] sm:max-w-[75%] p-4 rounded-3xl ${
+                  msg.role === 'user'
+                    ? 'bg-foreground/[0.05] text-foreground rounded-tr-sm'
+                    : 'bg-transparent text-foreground font-serif text-xl sm:text-2xl leading-relaxed py-4'
+                }`}>
+                  {/* Only last AI message gets Typewriter */}
+                  {msg.role === 'ai' && idx === store.history.length - 1 && !store.isAiTyping ? (
+                    <Typewriter ref={typewriterRef} text={msg.text.replace('[Voice]', '')} speed={35} />
+                  ) : (
+                    msg.text.replace('[Voice]', '')
+                  )}
                 </div>
               </motion.div>
             ))}
@@ -359,6 +398,7 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
         <div className="p-4 sm:p-6 pb-8 bg-gradient-to-t from-background via-background to-transparent">
           <form onSubmit={handleSendText} className="relative flex items-center">
             <input type="text" autoFocus value={inputText} onChange={(e) => setInputText(e.target.value)}
+              onFocus={() => typewriterRef.current?.finish()}
               disabled={store.isAiTyping} placeholder="Type your response..."
               className="w-full bg-foreground/[0.03] border border-foreground/10 text-foreground rounded-full pl-6 pr-14 py-4 focus:outline-none focus:ring-2 focus:ring-accent-amber/50 placeholder:text-foreground/30 disabled:opacity-50 transition-all font-sans"
             />
@@ -418,7 +458,22 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
           </div>
           <h2 className="text-3xl font-serif tracking-tight mb-4">All done!</h2>
           <p className="text-foreground/70">Your answers have been securely submitted to the creator of "{form.title}".</p>
-          <p className="mt-8 text-xs text-foreground/40 font-medium tracking-wide uppercase">Powered by Voca</p>
+          
+          {/* Viral Powered-By Banner */}
+          <div className="mt-10 p-6 rounded-2xl bg-accent-amber/10 border border-accent-amber/20 text-left">
+            <p className="text-sm font-medium text-foreground/60 uppercase tracking-wider mb-2">Forms are dead.</p>
+            <p className="text-lg font-serif font-medium text-foreground mb-4">
+              Build your own conversational AI form — free forever.
+            </p>
+            <a
+              href="/?ref=form_completion"
+              className="inline-flex items-center gap-2 bg-accent-amber text-black text-sm font-semibold px-5 py-2.5 rounded-full hover:opacity-90 transition-opacity"
+            >
+              Create Yours <ExternalLink className="h-4 w-4" />
+            </a>
+          </div>
+          
+          <p className="mt-6 text-xs text-foreground/30 font-medium tracking-wide uppercase">Powered by Voca</p>
         </motion.div>
       </main>
     )

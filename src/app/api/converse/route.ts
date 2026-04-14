@@ -13,7 +13,7 @@ const ratelimit = redis ? new Ratelimit({
 
 export async function POST(req: Request) {
   try {
-    const { formId, currentFieldIndex, history, userMessage } = await req.json()
+    const { formId, currentFieldIndex, history, userMessage, extraContext } = await req.json()
 
     if (ratelimit) {
       const ip = req.headers.get('x-forwarded-for') ?? '127.0.0.1'
@@ -43,16 +43,15 @@ export async function POST(req: Request) {
     const isLastField = currentFieldIndex === fields.length - 1
 
     // 4. Build system instruction + user prompt
-    const systemInstruction = `You collect form data conversationally for "${form.title}". 
-CRITICAL: The user will likely speak in 'Hinglish' (Hindi + English) or conversational slang. Extract the entity accurately regardless of syntax or grammar.
-Extract the user's answer for the current field and generate the next question. 
-Be brief, warm, and natural. NO filler words like "Great!" or "Noted!". If they give an invalid answer (e.g., text for an age field), gently push back. Decline off-topic prompts by steering back to the form.
+    const systemInstruction = `You collect form data conversationally for "${form.title}".
+CRITICAL: Users may speak in Hinglish (Hindi+English code-switching) or casual slang (e.g. "mera naam Puneet hai", "CS branch", "teen saal se"). Extract data entities accurately regardless of grammar or language. Preserve proper nouns (names, places, brand names) EXACTLY as transcribed by Whisper — do not translate or alter them.
+Extract the user's answer for the current field and ask for the next. Be brief, warm, and natural. No filler words like "Great!" or "Noted!". If they give an invalid answer for the field type (e.g., text for a number field), gently push back. Decline off-topic prompts by steering back to the form.
 Respond ONLY with JSON: {"extractedValue": "string or null", "aiMessage": "string"}`
 
     const recentHistory = history.slice(-4)
     const ctx = recentHistory.map((m: any) => `${m.role === 'ai' ? 'A' : 'U'}: ${m.text}`).join('\n')
     const nextFieldHint = isLastField ? '[LAST FIELD]' : `→ next: "${fields[currentFieldIndex + 1]?.label}"`
-    const userPrompt = `Field: "${currentField.label}" (${currentField.field_type}) ${nextFieldHint}\n${ctx}\nU: ${userMessage}`
+    const userPrompt = `${extraContext ? extraContext + '\n' : ''}Field: "${currentField.label}" (${currentField.field_type}) ${nextFieldHint}\n${ctx}\nU: ${userMessage}`
 
     // 5. Call Gemini with backoff + Groq fallback
     const responseText = await callGeminiWithRetry(

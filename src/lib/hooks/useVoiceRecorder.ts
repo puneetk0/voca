@@ -4,6 +4,7 @@ export function useVoiceRecorder(onTranscription: (text: string) => void, formId
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [stream, setStream] = useState<MediaStream | null>(null)
   
   const mediaRecorder = useRef<MediaRecorder | null>(null)
   const audioChunks = useRef<BlobPart[]>([])
@@ -33,6 +34,7 @@ export function useVoiceRecorder(onTranscription: (text: string) => void, formId
       mediaRecorder.current.onstop = async () => {
         const audioBlob = new Blob(audioChunks.current, { type: mimeType })
         setIsRecording(false)
+        setStream(null)
         setIsProcessing(true)
 
         try {
@@ -62,6 +64,7 @@ export function useVoiceRecorder(onTranscription: (text: string) => void, formId
 
       mediaRecorder.current.start()
       setIsRecording(true)
+      setStream(stream)
       setError(null)
     } catch (e: any) {
       setError('Microphone access denied or unavailable.')
@@ -75,5 +78,5 @@ export function useVoiceRecorder(onTranscription: (text: string) => void, formId
     }
   }, [])
 
-  return { startRecording, stopRecording, isRecording, isProcessing, error }
+  return { startRecording, stopRecording, isRecording, isProcessing, error, stream }
 }

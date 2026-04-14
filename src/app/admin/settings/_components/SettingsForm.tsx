@@ -2,21 +2,47 @@
 
 import { useState } from 'react'
 import { saveUserKeys } from '@/lib/actions/keys'
-import { CheckCircle2 } from 'lucide-react'
+import { validateAPIKeys } from '@/lib/actions/validate-keys'
+import { CheckCircle2, XCircle, Loader2 } from 'lucide-react'
 
-export default function SettingsForm({ initialGemini, initialGroq }: { initialGemini: string, initialGroq: string }) {
+type KeyStatus = 'idle' | 'checking' | 'valid' | 'invalid'
+
+export default function SettingsForm({ initialGemini, initialGroq }: { initialGemini: string; initialGroq: string }) {
   const [geminiKey, setGeminiKey] = useState(initialGemini)
   const [groqKey, setGroqKey] = useState(initialGroq)
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState('')
+  const [geminiStatus, setGeminiStatus] = useState<KeyStatus>('idle')
+  const [groqStatus, setGroqStatus] = useState<KeyStatus>('idle')
+  const [geminiError, setGeminiError] = useState('')
+  const [groqError, setGroqError] = useState('')
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault()
     setStatus('loading')
+    setGeminiStatus('checking')
+    setGroqStatus('checking')
+    setGeminiError('')
+    setGroqError('')
     setErrorMessage('')
 
-    const result = await saveUserKeys(geminiKey, groqKey)
+    // Step 1: Pre-flight validation
+    const validation = await validateAPIKeys(geminiKey, groqKey)
 
+    setGeminiStatus(validation.gemini ? 'valid' : 'invalid')
+    setGroqStatus(validation.groq ? 'valid' : 'invalid')
+
+    if (validation.geminiError) setGeminiError(validation.geminiError)
+    if (validation.groqError) setGroqError(validation.groqError)
+
+    if (!validation.gemini || !validation.groq) {
+      setStatus('error')
+      setErrorMessage('One or more keys failed validation. Please fix them before saving.')
+      return
+    }
+
+    // Step 2: Save to DB
+    const result = await saveUserKeys(geminiKey, groqKey)
     if (result?.error) {
       setStatus('error')
       setErrorMessage(result.error)
@@ -26,52 +52,72 @@ export default function SettingsForm({ initialGemini, initialGroq }: { initialGe
     }
   }
 
+  const KeyIndicator = ({ status, error }: { status: KeyStatus; error: string }) => {
+    if (status === 'idle') return null
+    if (status === 'checking') return <Loader2 className="h-4 w-4 animate-spin text-foreground/40" />
+    if (status === 'valid') return <CheckCircle2 className="h-4 w-4 text-accent-sage" />
+    return (
+      <div className="flex items-center gap-1.5">
+        <XCircle className="h-4 w-4 text-red-500 shrink-0" />
+        {error && <span className="text-xs text-red-500">{error}</span>}
+      </div>
+    )
+  }
+
   return (
     <form onSubmit={handleSave} className="space-y-6 max-w-xl">
       <div className="space-y-4 bg-foreground/[0.02] border border-foreground/10 p-6 rounded-2xl">
+        {/* Gemini Key */}
         <div>
-          <label htmlFor="gemini_key" className="block text-sm font-medium">Google Gemini API Key</label>
+          <div className="flex items-center justify-between mb-2">
+            <label htmlFor="gemini_key" className="block text-sm font-medium">Google Gemini API Key</label>
+            <KeyIndicator status={geminiStatus} error={geminiError} />
+          </div>
           <input
             id="gemini_key"
             type="password"
             required
             value={geminiKey}
-            onChange={(e) => setGeminiKey(e.target.value)}
+            onChange={(e) => { setGeminiKey(e.target.value); setGeminiStatus('idle') }}
             placeholder="AIzaSy..."
-            className="mt-2 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
+            className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
           />
         </div>
 
+        {/* Groq Key */}
         <div className="pt-4 border-t border-foreground/10">
-          <label htmlFor="groq_key" className="block text-sm font-medium">Groq API Key</label>
+          <div className="flex items-center justify-between mb-2">
+            <label htmlFor="groq_key" className="block text-sm font-medium">Groq API Key</label>
+            <KeyIndicator status={groqStatus} error={groqError} />
+          </div>
           <input
             id="groq_key"
             type="password"
             required
             value={groqKey}
-            onChange={(e) => setGroqKey(e.target.value)}
+            onChange={(e) => { setGroqKey(e.target.value); setGroqStatus('idle') }}
             placeholder="gsk_..."
-            className="mt-2 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
+            className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
           />
         </div>
       </div>
 
       {status === 'error' && (
-         <div className="p-3 rounded-lg bg-red-500/10 text-red-500 text-sm">{errorMessage}</div>
+        <div className="p-3 rounded-lg bg-red-500/10 text-red-500 text-sm">{errorMessage}</div>
       )}
-
       {status === 'success' && (
-         <div className="p-3 rounded-lg bg-accent-sage/10 text-accent-sage text-sm flex items-center gap-2">
-           <CheckCircle2 className="h-4 w-4" /> Keys updated securely
-         </div>
+        <div className="p-3 rounded-lg bg-accent-sage/10 text-accent-sage text-sm flex items-center gap-2">
+          <CheckCircle2 className="h-4 w-4" /> Keys validated and updated securely.
+        </div>
       )}
 
       <button
         type="submit"
         disabled={status === 'loading'}
-        className="flex justify-center rounded-full bg-accent-amber px-8 py-3 text-sm font-semibold text-black shadow-sm hover:opacity-90 disabled:opacity-50 transition-all"
+        className="flex items-center gap-2 justify-center rounded-full bg-accent-amber px-8 py-3 text-sm font-semibold text-black shadow-sm hover:opacity-90 disabled:opacity-50 transition-all"
       >
-        {status === 'loading' ? 'Saving...' : 'Update Keys'}
+        {status === 'loading' && <Loader2 className="h-4 w-4 animate-spin" />}
+        {status === 'loading' ? 'Validating & Saving...' : 'Update Keys'}
       </button>
     </form>
   )
