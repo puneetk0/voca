@@ -1,0 +1,78 @@
+# Voca | Voice-First Conversational Form Builder
+
+This plan operationalizes the PRD into an actionable, phased build process targeting a complete V1 within 4 weeks. 
+
+## User Review Required
+
+> [!WARNING]
+> **Audio Architecture on iOS**: The PRD mandates `audio/webm;codecs=opus`. However, **iOS Safari does not natively support recording in WebM.** To ensure maximum mobile compatibility, the `MediaRecorder` setup will need to proactively detect iOS environments and fallback to `audio/mp4`.
+
+> [!TIP]
+> **LLM Response Latency vs "Thinking" Time**: When generating conversational responses via Gemini, relying on the full JSON payload before returning data will result in long "thinking" pauses. To mitigate this, we should utilize **Streaming (Vercel AI SDK)** to chunk responses sentence-by-sentence (or output the conversational response first, and metadata second). This enables the Web Speech API to start reading the AI's response aloud almost instantly.
+
+## Proposed Implementation Plan
+
+The build process is divided into 5 chronological phases.
+
+### Phase 1: Infrastructure & Data Architecture
+
+- **Next.js Foundation**: Initialize Next.js 14 (App Router), configure Tailwind CSS, and apply the "Warm Dark" design tokens (deep navy/black backgrounds, warm typography).
+- **Supabase Setup**: Define Data Models via raw SQL (`users`, `forms`, `fields`, `responses`, `answers`, `transcripts`).
+- **Security (Row Level Security)**: Implement strict RLS policies ensuring that responders can only *insert* new responses but have zero read privileges over other submissions.
+- **API Key Vault System**: Build the secure onboarding flow allowing Admins to supply their Gemini & Groq API keys directly into Supabase Vault.
+
+### Phase 2: Admin Builder Flow
+
+- **Auth Layer**: Implement Supabase Magic Link authentication.
+- **Natural Language Parsing (`/api/create-form`)**: 
+  - Call Gemini to convert natural language prompts into structured form schemas.
+  - Require strict JSON structured output from Gemini.
+- **Admin UI**: 
+  - Dashboard to list forms.
+  - Schema Confirmation screen (view, edit, and reorganize generated fields).
+  - Shareable link generator UI.
+
+### Phase 3: Core Responder Logic (Text-First)
+
+- **Landing UI**: "Talk or Type" choice screen implementing full-screen minimalism.
+- **Conversation State Management**: Implement React Context or Zustand to hold `currentFieldIndex`, `conversationHistory`, and `formContext`.
+- **Text Chat UI**: Core chat window with smooth scroll and warm typography.
+- **AI Conversation Engine (`/api/converse`)**: 
+  - Prompt engineer the system to reject off-topic responses, redirect the user, and format successful parsing into a JSON metadata payload.
+  - Handle iterative form progressing until all fields are complete.
+
+### Phase 4: Voice Integration (The Magic Layer)
+
+- **Microphone Management**: Cross-browser `MediaRecorder` hook.
+- **Transcription (`/api/transcribe`)**: Forward compressed audio blobs to Groq's fast Whisper endpoint. 
+- **TTS (Text-to-Speech)**: Hook into the browser's native `SpeechSynthesis API`.
+- **Visual Feedback**:
+  - Implement the "Listening" waveform animation (reactive and fast).
+  - Implement the "Thinking" state pulse (calm and inward).
+  - Screen reader considerations.
+
+### Phase 5: Submission, Review & Final Polish
+
+- **Review Screen**: Render the completed form securely to the responder for final sanity checks before submission.
+- **Submission API (`/api/submit`)**: Atomic batched insert to Supabase (`responses` + `answers` + `transcripts`).
+- **Confirmation Page**: Dynamic summary thanking the user by name.
+- **Rate Limiting**: Protect `/api/converse` and `/api/transcribe` with Upstash Redis (throttle abusers).
+- **Sound Design**: Introduce subtle, optional chimes for conversation transitions.
+
+## Open Questions
+
+> [!IMPORTANT]
+> **API Key Costs & Management**: The PRD dictates a BYOK (Bring Your Own Key) model for form creators. Will users be required to enter both a Groq key *and* a Gemini key immediately upon sign-up before creating their first form?
+> 
+> **Web Speech API Quality**: Browser-native TTS can sound slightly robotic on older devices. Since you prioritized the conversational experience over a form experience, are we absolutely strict on using the browser `SpeechSynthesis API` (free), or should we leave room for a BYOK ElevenLabs / OpenAI TTS fallback if the user wants maximum realism?
+
+## Verification Plan
+
+### Automated Tests
+- TypeScript strict typings validation across all API routes.
+- Component-level logic testing for our cross-browser `MediaRecorder` fallback mechanisms.
+
+### Manual Verification
+- Deploying a test build on Vercel to thoroughly verify iOS Safari microphone behavior.
+- Verifying the "Thinking" state time threshold and monitoring Groq/Gemini API latencies. 
+- Using Edge functions / serverless constraints to ensure there are no Vercel Hobby Tier timeout issues.
