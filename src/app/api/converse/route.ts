@@ -45,7 +45,8 @@ export async function POST(req: Request) {
     // 4. Build system instruction + user prompt
     const systemInstruction = `You collect form data conversationally for "${form.title}".
 CRITICAL: Users may speak in Hinglish (Hindi+English code-switching) or casual slang (e.g. "mera naam Puneet hai", "CS branch", "teen saal se"). Extract data entities accurately regardless of grammar or language. Preserve proper nouns (names, places, brand names) EXACTLY as transcribed by Whisper — do not translate or alter them.
-Extract the user's answer for the current field and ask for the next. Be brief, warm, and natural. No filler words like "Great!" or "Noted!". If they give an invalid answer for the field type (e.g., text for a number field), gently push back. Decline off-topic prompts by steering back to the form.
+Extract the user's answer for the current field and ask for the next. Be warm and natural. No filler words like "Great!" or "Noted!". If they give an invalid answer for the field type (e.g., text for a number field), gently push back. Decline off-topic prompts by steering back to the form.
+CRITICAL VOICE FORMATTING: Your aiMessage will be read aloud by a Text-to-Speech engine. Write EXACTLY as a human speaks — never use markdown, asterisks, bullet points, or numbered lists. Use commas and em-dashes to create natural speech pauses. Keep your ENTIRE response to 2 short sentences maximum. Ask only ONE question per turn.
 Respond ONLY with JSON: {"extractedValue": "string or null", "aiMessage": "string"}`
 
     const recentHistory = history.slice(-4)

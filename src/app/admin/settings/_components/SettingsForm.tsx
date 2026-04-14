@@ -7,42 +7,53 @@ import { CheckCircle2, XCircle, Loader2 } from 'lucide-react'
 
 type KeyStatus = 'idle' | 'checking' | 'valid' | 'invalid'
 
-export default function SettingsForm({ initialGemini, initialGroq }: { initialGemini: string; initialGroq: string }) {
+export default function SettingsForm({ initialGemini, initialGroq, initialGoogleTTS }: { initialGemini: string; initialGroq: string; initialGoogleTTS?: string }) {
   const [geminiKey, setGeminiKey] = useState(initialGemini)
   const [groqKey, setGroqKey] = useState(initialGroq)
+  const [googleTTSKey, setGoogleTTSKey] = useState(initialGoogleTTS || '')
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [geminiStatus, setGeminiStatus] = useState<KeyStatus>('idle')
   const [groqStatus, setGroqStatus] = useState<KeyStatus>('idle')
+  const [googleTTSStatus, setGoogleTTSStatus] = useState<KeyStatus>('idle')
   const [geminiError, setGeminiError] = useState('')
   const [groqError, setGroqError] = useState('')
+  const [googleTTSError, setGoogleTTSError] = useState('')
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault()
     setStatus('loading')
     setGeminiStatus('checking')
     setGroqStatus('checking')
+    if (googleTTSKey) setGoogleTTSStatus('checking')
+    else setGoogleTTSStatus('idle')
+
     setGeminiError('')
     setGroqError('')
+    setGoogleTTSError('')
     setErrorMessage('')
 
     // Step 1: Pre-flight validation
-    const validation = await validateAPIKeys(geminiKey, groqKey)
+    const validation = await validateAPIKeys(geminiKey, groqKey, googleTTSKey)
 
     setGeminiStatus(validation.gemini ? 'valid' : 'invalid')
     setGroqStatus(validation.groq ? 'valid' : 'invalid')
+    if (googleTTSKey) {
+      setGoogleTTSStatus(validation.googleTTS ? 'valid' : 'invalid')
+    }
 
     if (validation.geminiError) setGeminiError(validation.geminiError)
     if (validation.groqError) setGroqError(validation.groqError)
+    if (validation.googleTTSError) setGoogleTTSError(validation.googleTTSError)
 
-    if (!validation.gemini || !validation.groq) {
+    if (!validation.gemini || !validation.groq || (googleTTSKey && !validation.googleTTS)) {
       setStatus('error')
       setErrorMessage('One or more keys failed validation. Please fix them before saving.')
       return
     }
 
     // Step 2: Save to DB
-    const result = await saveUserKeys(geminiKey, groqKey)
+    const result = await saveUserKeys(geminiKey, groqKey, googleTTSKey)
     if (result?.error) {
       setStatus('error')
       setErrorMessage(result.error)
@@ -97,6 +108,21 @@ export default function SettingsForm({ initialGemini, initialGroq }: { initialGe
             value={groqKey}
             onChange={(e) => { setGroqKey(e.target.value); setGroqStatus('idle') }}
             placeholder="gsk_..."
+            className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
+          />
+        </div>
+        {/* Google TTS Key */}
+        <div className="pt-4 border-t border-foreground/10">
+          <div className="flex items-center justify-between mb-2">
+            <label htmlFor="google_tts_key" className="block text-sm font-medium">Google Cloud TTS API Key <span className="opacity-50 font-normal">(Optional)</span></label>
+            <KeyIndicator status={googleTTSStatus} error={googleTTSError} />
+          </div>
+          <input
+            id="google_tts_key"
+            type="password"
+            value={googleTTSKey}
+            onChange={(e) => { setGoogleTTSKey(e.target.value); setGoogleTTSStatus('idle') }}
+            placeholder="AIzaSy... (Premium Voice)"
             className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
           />
         </div>

@@ -12,7 +12,7 @@ export default async function SettingsPage() {
 
   const { data: keys } = await supabase
     .from('user_keys')
-    .select('gemini_key, groq_key')
+    .select('gemini_key, groq_key, google_tts_key')
     .eq('user_id', user.id)
     .single()
 
@@ -25,7 +25,11 @@ export default async function SettingsPage() {
         <p className="mt-2 text-foreground/60">Update your model credentials.</p>
       </div>
       
-      <SettingsForm initialGemini={keys?.gemini_key || ''} initialGroq={keys?.groq_key || ''} />
+      <SettingsForm 
+        initialGemini={keys?.gemini_key || ''} 
+        initialGroq={keys?.groq_key || ''} 
+        initialGoogleTTS={keys?.google_tts_key || ''} 
+      />
     </main>
   )
 }

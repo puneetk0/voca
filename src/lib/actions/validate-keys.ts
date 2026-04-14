@@ -7,6 +7,8 @@ interface ValidationResult {
   geminiError?: string
   groq: boolean
   groqError?: string
+  googleTTS?: boolean
+  googleTTSError?: string
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -23,7 +25,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): P
   }
 }
 
-export async function validateAPIKeys(geminiKey: string, groqKey: string): Promise<ValidationResult> {
+export async function validateAPIKeys(geminiKey: string, groqKey: string, googleTTSKey?: string): Promise<ValidationResult> {
   const result: ValidationResult = { gemini: false, groq: false }
 
   // --- Gemini check ---
@@ -31,7 +33,7 @@ export async function validateAPIKeys(geminiKey: string, groqKey: string): Promi
     await withTimeout(
       (async () => {
         const genAI = new GoogleGenerativeAI(geminiKey)
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' })
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' })
         await model.generateContent('ping')
       })(),
       5000,
@@ -73,6 +75,32 @@ export async function validateAPIKeys(geminiKey: string, groqKey: string): Promi
       result.groqError = 'Network timeout — Groq check took too long. Try again.'
     } else {
       result.groqError = `Groq error: ${e.message}`
+    }
+  }
+
+  // --- Google TTS check (Optional) ---
+  if (googleTTSKey) {
+    try {
+      const ac = new AbortController()
+      const timer = setTimeout(() => ac.abort(), 5000)
+      const res = await fetch(`https://texttospeech.googleapis.com/v1/voices?key=${googleTTSKey}`, {
+        signal: ac.signal,
+      })
+      clearTimeout(timer)
+      if (res.ok) {
+        result.googleTTS = true
+      } else if (res.status === 400 || res.status === 403) {
+        result.googleTTSError = 'Invalid or unauthorised Google TTS API key.'
+      } else {
+        result.googleTTSError = `Google TTS returned ${res.status}.`
+      }
+    } catch (e: any) {
+      if (e.name === 'AbortError') {
+        result.googleTTSError = 'Network timeout — Google TTS check took too long.'
+      } else {
+        result.googleTTSError = `Google TTS error: ${e.message}`
+      }
+      result.googleTTS = false
     }
   }
 

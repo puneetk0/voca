@@ -17,6 +17,9 @@ const GHOST_MESSAGES = [
   "Hmm, let me think about that one carefully...",
 ]
 
+// Instant filler words spoken the moment the user stops talking — masks API latency
+const FILLERS = ["Hmm...", "Okay,", "Got it.", "Let me see...", "Alright,", "Sure."]
+
 const CONVERSE_TIMEOUT_MS = 7000
 
 /** Fetch /api/converse with a 7s AbortController timeout */
@@ -54,6 +57,7 @@ export default function FormSession({
   const [inputText, setInputText] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
+  const [audioRef, setAudioRef] = useState<HTMLAudioElement | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const typewriterRef = useRef<TypewriterHandle>(null)
 
@@ -73,6 +77,9 @@ export default function FormSession({
       gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3)
       osc.start(ctx.currentTime)
       osc.stop(ctx.currentTime + 0.3)
+      setTimeout(() => {
+        if (ctx.state !== 'closed') ctx.close().catch(() => {})
+      }, 500)
     } catch (e) {}
   }
 
@@ -95,17 +102,64 @@ export default function FormSession({
     }
   }, [store.history, store.isAiTyping, store.mode])
 
-  // --- TTS ---
-  const speak = useCallback((text: string, onEnd: () => void) => {
-    if (!('speechSynthesis' in window)) { onEnd(); return }
+  // --- TTS --- (Premium Google TTS with Native Fallback)
+  const playSmartAudio = useCallback(async (text: string, onEnd: () => void, cancelFirst = true) => {
     setVoiceState('speaking')
-    const utterance = new SpeechSynthesisUtterance(text)
-    utterance.volume = 1; utterance.rate = 1.05; utterance.pitch = 1
-    utterance.onend = onEnd
-    utterance.onerror = () => onEnd()
-    window.speechSynthesis.cancel()
-    window.speechSynthesis.speak(utterance)
-  }, [])
+    
+    if (cancelFirst) {
+      window.speechSynthesis.cancel()
+      if (audioRef) {
+        audioRef.pause()
+        audioRef.currentTime = 0
+      }
+    }
+
+    try {
+      // 1. Try to fetch premium audio
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ formId: form.id, text })
+      })
+      const data = await res.json()
+
+      // 2. Fallback routing
+      if (data.fallback || data.error) {
+         throw new Error("Use native browser TTS")
+      }
+
+      // 3. Play Premium Audio
+      // If we don't already have an audio object, create one.
+      const audioToPlay = audioRef || new Audio()
+      audioToPlay.src = `data:audio/mp3;base64,${data.audioContent}`
+      
+      const handleEnded = () => {
+        setAudioRef(null)
+        onEnd()
+      }
+      audioToPlay.onended = handleEnded
+      audioToPlay.onerror = handleEnded
+      
+      setAudioRef(audioToPlay)
+      await audioToPlay.play()
+
+    } catch (e) {
+      // 4. Native Browser Fallback (If no key, or network fails)
+      if (!('speechSynthesis' in window)) { onEnd(); return }
+      const utterance = new SpeechSynthesisUtterance(text)
+      
+      // Attempt to grab an Indian/Google voice if available on the device
+      const voices = window.speechSynthesis.getVoices()
+      const preferredVoice = voices.find(v => v.lang.includes('en-IN') || v.name.includes('Google'))
+      if (preferredVoice) utterance.voice = preferredVoice
+      
+      utterance.rate = 1.05
+      utterance.onend = onEnd
+      utterance.onerror = () => onEnd()
+      window.speechSynthesis.speak(utterance)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.id, audioRef])
 
   // --- CORE CONVERSE HANDLER ---
   const handleConverseResponse = useCallback(async (
@@ -176,15 +230,52 @@ export default function FormSession({
   // --- VOICE LOGIC ---
   const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream } = useVoiceRecorder(
     async (transcript) => {
-      store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Voice] ${transcript}` })
+      // Guardrail: If they sneezed, or if Whisper picked up a 1-letter static pop, don't confuse the LLM
+      const cleanTranscript = transcript.trim()
+      if (cleanTranscript.length < 2) {
+        playSmartAudio("Sorry, I didn't quite catch that. Could you repeat?", () => {
+          setVoiceState('listening')
+          startRecording()
+        }, true)
+        return
+      }
+
+      store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Voice] ${cleanTranscript}` })
       const fieldIndex = store.currentFieldIndex
-      await handleConverseResponse(transcript, fieldIndex, 'voice', (aiMessage, isComplete) => {
-        speak(aiMessage, () => {
+
+      // 4.3: Speak a filler immediately while fetch runs concurrently
+      const fillerText = FILLERS[Math.floor(Math.random() * FILLERS.length)]
+      setVoiceState('thinking')
+
+      let fetchSettled = false
+      let fetchPayload: { aiMessage: string; isComplete: boolean } | null = null
+      let fillerFinished = false
+
+      // Deliver the real AI response — called from whichever settles last
+      function deliverAIResponse(aiMessage: string, isComplete: boolean) {
+        playSmartAudio(aiMessage, () => {
           setVoiceState('idle')
           if (!isComplete) startRecording()
           else store.setMode('review')
-        })
+        }, false) // false = don't cancel queue (filler already finished)
+      }
+
+      // Start the API fetch concurrently
+      handleConverseResponse(transcript, fieldIndex, 'voice', (aiMessage, isComplete) => {
+        fetchSettled = true
+        fetchPayload = { aiMessage, isComplete }
+        if (fillerFinished) deliverAIResponse(aiMessage, isComplete)
       })
+
+      // Speak the filler — when done, check if fetch also settled
+      // Fallback is immediate so network fetch won't delay it.
+      playSmartAudio(fillerText, () => {
+        fillerFinished = true
+        if (fetchSettled && fetchPayload) {
+          deliverAIResponse(fetchPayload.aiMessage, fetchPayload.isComplete)
+        }
+        // else: fetchPayload.then will call deliverAIResponse when ready
+      }, true) // cancel any lingering TTS first
     },
     form.id,
   )
@@ -203,7 +294,20 @@ export default function FormSession({
   }, [store.mode])
 
   async function handleInitialSequence(mode: 'text' | 'voice') {
-    if (mode === 'voice') setVoiceState('thinking')
+    if (mode === 'voice') {
+      try {
+        // 1. Request mic permission BEFORE starting the TTS sequence
+        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        tempStream.getTracks().forEach(t => t.stop()) // close it immediately once granted
+        // Important: Initialize empty audio on direct click bypasses Apple's autoplay policy
+        if (!audioRef) setAudioRef(new Audio())
+      } catch (err) {
+        // If they block the mic, fall back to text mode gracefully
+        store.setMode('text')
+        return
+      }
+      setVoiceState('thinking')
+    }
 
     // Build prefill context for first call
     const prefillEntries = Object.entries(prefills)
@@ -213,7 +317,7 @@ export default function FormSession({
 
     await handleConverseResponse('Hello', 0, mode, (aiMessage) => {
       if (mode === 'voice') {
-        speak(aiMessage, () => { setVoiceState('idle'); startRecording() })
+        playSmartAudio(aiMessage, () => { setVoiceState('idle'); startRecording() })
       }
     }, prefillNote)
   }
@@ -347,7 +451,12 @@ export default function FormSession({
             ))}
           </div>
 
-          <button onClick={() => { window.speechSynthesis.cancel(); stopRecording(); store.setMode('text') }}
+          <button onClick={() => { 
+            window.speechSynthesis.cancel(); 
+            if (audioRef) { audioRef.pause(); audioRef.currentTime = 0; }
+            stopRecording(); 
+            store.setMode('text'); 
+          }}
             className="mt-12 text-sm text-foreground/40 hover:text-foreground/80 transition-colors"
           >
             Switch to Keyboard

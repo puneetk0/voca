@@ -3,7 +3,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 
-export async function saveUserKeys(geminiKey: string, groqKey: string) {
+export async function saveUserKeys(geminiKey: string, groqKey: string, googleTTSKey?: string) {
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
@@ -23,7 +23,8 @@ export async function saveUserKeys(geminiKey: string, groqKey: string) {
       .upsert({ 
         user_id: user.id, 
         gemini_key: geminiKey, 
-        groq_key: groqKey 
+        groq_key: groqKey,
+        google_tts_key: googleTTSKey || null
       })
 
     if (error) {

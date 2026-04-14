@@ -92,7 +92,9 @@ export default function Waveform({ stream, isActive, color = '#f59e0b' }: Wavefo
     return () => {
       cancelAnimationFrame(rafRef.current)
       source.disconnect()
-      ctx.close()
+      if (ctx.state !== 'closed') {
+        ctx.close().catch(() => {})
+      }
     }
   }, [stream, isActive, color])
 
