@@ -1,5 +1,5 @@
 'use server'
-import { createClient } from '@/lib/supabase/server'
+import { supabaseAdmin } from '@/lib/supabase/admin'
 
 export async function submitResponse(
   formId: string, 
@@ -7,7 +7,7 @@ export async function submitResponse(
   answers: Record<string, string>, 
   history: any[]
 ) {
-  const supabase = await createClient()
+  const supabase = supabaseAdmin
 
   // 1. Insert Response
   const { data: response, error: responseErr } = await supabase

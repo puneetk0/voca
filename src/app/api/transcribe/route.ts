@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
+import { createClient } from '@/lib/supabase/server'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -14,28 +15,39 @@ export async function POST(req: Request) {
   try {
     const formData = await req.formData()
     const file = formData.get('audio') as Blob
-    const formId = formData.get('formId') as string
+    const formId = formData.get('formId') as string | null
 
-    if (!file || !formId) {
-      return NextResponse.json({ error: 'Missing audio or formId' }, { status: 400 })
+    if (!file) {
+      return NextResponse.json({ error: 'Missing audio' }, { status: 400 })
     }
 
     if (ratelimit) {
       const ip = req.headers.get('x-forwarded-for') ?? '127.0.0.1'
-      const { success } = await ratelimit.limit(`transcribe_${ip}_${formId}`)
+      const { success } = await ratelimit.limit(`transcribe_${ip}_${formId ?? 'admin'}`)
       if (!success) {
         return NextResponse.json({ error: "You're going too fast — please wait a moment before continuing." }, { status: 429 })
       }
     }
 
-    // 1. Fetch form -> user_id
-    const { data: form } = await supabaseAdmin.from('forms').select('user_id').eq('id', formId).single()
-    if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
+    let groqKey: string | null = null
 
-    // 2. Fetch admin Groq Key (bypassing RLS)
-    const { data: keys } = await supabaseAdmin.from('user_keys').select('groq_key').eq('user_id', form.user_id).single()
-    if (!keys?.groq_key) {
-      return NextResponse.json({ error: 'Form owner has no Groq API Key' }, { status: 400 })
+    if (formId) {
+      // Responder path: look up key via form owner
+      const { data: form } = await supabaseAdmin.from('forms').select('user_id').eq('id', formId).single()
+      if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
+      const { data: keys } = await supabaseAdmin.from('user_keys').select('groq_key').eq('user_id', form.user_id).single()
+      groqKey = keys?.groq_key ?? null
+    } else {
+      // Admin path: look up key via authenticated session
+      const supabase = await createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+      const { data: keys } = await supabaseAdmin.from('user_keys').select('groq_key').eq('user_id', user.id).single()
+      groqKey = keys?.groq_key ?? null
+    }
+
+    if (!groqKey) {
+      return NextResponse.json({ error: 'No Groq API Key configured. Add it in Settings.' }, { status: 400 })
     }
 
     // 3. Prepare payload for Groq Whisper
@@ -49,7 +61,7 @@ export async function POST(req: Request) {
     const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${keys.groq_key}`
+        'Authorization': `Bearer ${groqKey}`
       },
       body: groqData as unknown as BodyInit
     })

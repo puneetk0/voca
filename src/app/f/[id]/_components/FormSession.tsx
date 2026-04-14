@@ -146,7 +146,10 @@ export default function FormSession({ form, fields }: { form: any; fields: any[]
     if (data.aiMessage) store.addMessage({ id: Date.now().toString(), role: 'ai', text: data.aiMessage })
 
     store.setIsAiTyping(false)
-    if (data.aiMessage) onSuccess(data.aiMessage, !!data.isComplete)
+    
+    // Dual completion check: trust server flag OR detect we've advanced past the last field
+    const actuallyComplete = data.isComplete || (data.nextFieldIndex !== undefined && data.nextFieldIndex >= fields.length)
+    if (data.aiMessage) onSuccess(data.aiMessage, actuallyComplete)
   }, [form.id, store, fields])
 
   // --- VOICE LOGIC ---

@@ -43,7 +43,10 @@ export async function POST(req: Request) {
     const isLastField = currentFieldIndex === fields.length - 1
 
     // 4. Build system instruction + user prompt
-    const systemInstruction = `You collect form data conversationally for "${form.title}". Extract the user's answer for the current field and ask for the next. Be brief and natural. No filler words like "Great!" or "Noted!". Decline off-topic questions.
+    const systemInstruction = `You collect form data conversationally for "${form.title}". 
+CRITICAL: The user will likely speak in 'Hinglish' (Hindi + English) or conversational slang. Extract the entity accurately regardless of syntax or grammar.
+Extract the user's answer for the current field and generate the next question. 
+Be brief, warm, and natural. NO filler words like "Great!" or "Noted!". If they give an invalid answer (e.g., text for an age field), gently push back. Decline off-topic prompts by steering back to the form.
 Respond ONLY with JSON: {"extractedValue": "string or null", "aiMessage": "string"}`
 
     const recentHistory = history.slice(-4)
@@ -62,8 +65,9 @@ Respond ONLY with JSON: {"extractedValue": "string or null", "aiMessage": "strin
 
     const parsed = JSON.parse(responseText)
 
-    const isComplete = Boolean(parsed.extractedValue && isLastField)
-    const nextIndex = parsed.extractedValue ? currentFieldIndex + 1 : currentFieldIndex
+    // If we're on the last field, the conversation is done regardless of extraction result
+    const isComplete = isLastField
+    const nextIndex = parsed.extractedValue ? Math.min(currentFieldIndex + 1, fields.length) : currentFieldIndex
 
     return NextResponse.json({
       aiMessage: parsed.aiMessage,
