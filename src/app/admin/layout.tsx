@@ -27,10 +27,6 @@ export default async function AdminLayout({
 
   const hasKeys = keysData?.gemini_key && keysData?.groq_key
 
-  if (!hasKeys) {
-    redirect('/onboarding')
-  }
-
   return (
     <div className="min-h-screen bg-background">
       {/* Top Nav */}

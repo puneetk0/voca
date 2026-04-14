@@ -18,7 +18,7 @@ export async function saveUserKeys(geminiKey: string, groqKey: string) {
       await supabaseAdmin.from('users').insert({ id: user.id, email: user.email })
     }
 
-    const { error } = await supabase
+    const { error } = await supabaseAdmin
       .from('user_keys')
       .upsert({ 
         user_id: user.id, 

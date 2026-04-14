@@ -1,22 +1,25 @@
 'use client'
 
 import { useState } from 'react'
-import { loginWithMagicLink } from '@/lib/actions/auth'
+import { useRouter } from 'next/navigation'
+import { loginWithPassword } from '@/lib/actions/auth'
 import { Sparkles } from 'lucide-react'
 
 export default function LoginPage() {
+  const router = useRouter()
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [message, setMessage] = useState('')
 
   async function actionName(formData: FormData) {
     setStatus('loading')
-    const res = await loginWithMagicLink(formData)
+    const res = await loginWithPassword(formData)
     if (res?.error) {
       setStatus('error')
       setMessage(res.error)
     } else if (res?.success) {
       setStatus('success')
-      setMessage(res.message!)
+      router.push('/admin')
+      router.refresh()
     }
   }
 
@@ -30,7 +33,7 @@ export default function LoginPage() {
           Sign in to Voca
         </h2>
         <p className="mt-2 text-center text-sm text-foreground/60">
-          We'll send you a magic link to sign in instantly.
+          Enter an email and password. If you don't have an account, we'll create one instantly.
         </p>
       </div>
 
@@ -55,12 +58,28 @@ export default function LoginPage() {
             </div>
 
             <div>
+              <label htmlFor="password" className="block text-sm font-medium leading-6 text-foreground">
+                Password
+              </label>
+              <div className="mt-2">
+                <input
+                  id="password"
+                  name="password"
+                  type="password"
+                  required
+                  placeholder="••••••••"
+                  className="block w-full rounded-xl border-0 bg-background/50 py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 placeholder:text-foreground/30 focus:ring-2 focus:ring-inset focus:ring-accent-amber sm:text-sm sm:leading-6 transition-all"
+                />
+              </div>
+            </div>
+
+            <div>
               <button
                 type="submit"
                 disabled={status === 'loading'}
                 className="flex w-full justify-center rounded-full bg-accent-amber px-6 py-3 text-sm font-semibold text-black shadow-sm hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent-amber disabled:opacity-50 transition-all font-sans"
               >
-                {status === 'loading' ? 'Sending...' : 'Send Magic Link'}
+                {status === 'loading' ? 'Authenticating...' : 'Sign In / Create Account'}
               </button>
             </div>
             
