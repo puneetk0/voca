@@ -43,10 +43,19 @@ export async function POST(req: Request) {
     const isLastField = currentFieldIndex === fields.length - 1
 
     // 4. Build system instruction + user prompt
+    const emailInstruction = currentField.field_type === 'email'
+      ? `\nCRITICAL EMAIL FORMATTING: The user is providing an email address via voice.
+1. Strip ALL spaces from the extracted value.
+2. Convert to lowercase.
+3. Autocorrect common Whisper transcription artifacts: "dot con" → ".com", "dot net" → ".net", "dot co" → ".co", "at gmail" → "@gmail.com", "at yahoo" → "@yahoo.com", "at hotmail" → "@hotmail.com".
+4. Handle phonetic spelling (e.g. "P U N E E T at gmail dot com" → "puneet@gmail.com").
+5. If the result is NOT a structurally valid email matching pattern x@y.z, set "extractedValue": null and ask the user to slowly spell it out again.`
+      : ''
+
     const systemInstruction = `You collect form data conversationally for "${form.title}".
 CRITICAL: Users may speak in Hinglish (Hindi+English code-switching) or casual slang (e.g. "mera naam Puneet hai", "CS branch", "teen saal se"). Extract data entities accurately regardless of grammar or language. Preserve proper nouns (names, places, brand names) EXACTLY as transcribed by Whisper — do not translate or alter them.
 Extract the user's answer for the current field and ask for the next. Be warm and natural. No filler words like "Great!" or "Noted!". If they give an invalid answer for the field type (e.g., text for a number field), gently push back. Decline off-topic prompts by steering back to the form.
-CRITICAL VOICE FORMATTING: Your aiMessage will be read aloud by a Text-to-Speech engine. Write EXACTLY as a human speaks — never use markdown, asterisks, bullet points, or numbered lists. Use commas and em-dashes to create natural speech pauses. Keep your ENTIRE response to 2 short sentences maximum. Ask only ONE question per turn.
+CRITICAL VOICE FORMATTING: Your aiMessage will be read aloud by a Text-to-Speech engine. Write EXACTLY as a human speaks — never use markdown, asterisks, bullet points, or numbered lists. Use commas and em-dashes to create natural speech pauses. Keep your ENTIRE response to 2 short sentences maximum. Ask only ONE question per turn.${emailInstruction}
 Respond ONLY with JSON: {"extractedValue": "string or null", "aiMessage": "string"}`
 
     const recentHistory = history.slice(-4)

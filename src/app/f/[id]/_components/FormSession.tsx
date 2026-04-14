@@ -161,6 +161,15 @@ export default function FormSession({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.id, audioRef])
 
+  // Thinking message labels per field type — shown immediately while Gemini is working
+  function getThinkingLabel(fieldType: string, transcript: string) {
+    const short = transcript.slice(0, 40)
+    if (fieldType === 'email') return `Extracting email from "${short}"...`
+    if (fieldType === 'number') return `Noting your number from "${short}"...`
+    if (fieldType === 'phone') return `Reading phone number from "${short}"...`
+    return `Got it— processing "${short}"...`
+  }
+
   // --- CORE CONVERSE HANDLER ---
   const handleConverseResponse = useCallback(async (
     userMessage: string,
@@ -218,7 +227,11 @@ export default function FormSession({
 
     if (data.extractedValue) store.setAnswer(fields[fieldIndex].id, data.extractedValue)
     if (data.nextFieldIndex !== undefined) store.setNextField(data.nextFieldIndex)
-    if (data.aiMessage) store.addMessage({ id: Date.now().toString(), role: 'ai', text: data.aiMessage })
+
+    // Replace the optimistic thinking placeholder with the real AI message
+    if (data.aiMessage) {
+      store.replaceMessage('__ai_thinking__', { id: Date.now().toString(), role: 'ai', text: data.aiMessage })
+    }
 
     store.setIsAiTyping(false)
     
@@ -229,7 +242,7 @@ export default function FormSession({
 
   // --- VOICE LOGIC ---
   const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream } = useVoiceRecorder(
-    async (transcript) => {
+    async (transcript, audioBlob) => {
       // Guardrail: If they sneezed, or if Whisper picked up a 1-letter static pop, don't confuse the LLM
       const cleanTranscript = transcript.trim()
       if (cleanTranscript.length < 2) {
@@ -240,13 +253,25 @@ export default function FormSession({
         return
       }
 
-      store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Voice] ${cleanTranscript}` })
       const fieldIndex = store.currentFieldIndex
+      const currentField = fields[fieldIndex]
 
-      // 4.3: Speak a filler immediately while fetch runs concurrently
-      const fillerText = FILLERS[Math.floor(Math.random() * FILLERS.length)]
+      // 5.2: Save blob for this field so it can be uploaded on form submit
+      if (audioBlob) store.setAudioBlob(currentField.id, audioBlob)
+
+      // 5.3 Optimistic UI step 1: instantly push user message
+      store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Voice] ${cleanTranscript}` })
+
+      // 5.3 Optimistic UI step 2: push a "thinking" placeholder immediately
+      store.addMessage({
+        id: '__ai_thinking__',
+        role: 'ai',
+        text: getThinkingLabel(currentField?.field_type || 'text', cleanTranscript)
+      })
       setVoiceState('thinking')
 
+      // 5.3 Optimistic UI step 3: speak filler locally (native TTS, no network round-trip)
+      const fillerText = FILLERS[Math.floor(Math.random() * FILLERS.length)]
       let fetchSettled = false
       let fetchPayload: { aiMessage: string; isComplete: boolean } | null = null
       let fillerFinished = false
@@ -257,25 +282,33 @@ export default function FormSession({
           setVoiceState('idle')
           if (!isComplete) startRecording()
           else store.setMode('review')
-        }, false) // false = don't cancel queue (filler already finished)
+        }, false) // false = don't cancel filler
       }
 
       // Start the API fetch concurrently
-      handleConverseResponse(transcript, fieldIndex, 'voice', (aiMessage, isComplete) => {
+      handleConverseResponse(cleanTranscript, fieldIndex, 'voice', (aiMessage, isComplete) => {
         fetchSettled = true
         fetchPayload = { aiMessage, isComplete }
         if (fillerFinished) deliverAIResponse(aiMessage, isComplete)
       })
 
-      // Speak the filler — when done, check if fetch also settled
-      // Fallback is immediate so network fetch won't delay it.
-      playSmartAudio(fillerText, () => {
-        fillerFinished = true
-        if (fetchSettled && fetchPayload) {
-          deliverAIResponse(fetchPayload.aiMessage, fetchPayload.isComplete)
+      // Speak filler via NATIVE TTS immediately (no network wait)
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel()
+        const utt = new SpeechSynthesisUtterance(fillerText)
+        utt.rate = 1.05
+        utt.onend = () => {
+          fillerFinished = true
+          setVoiceState('thinking')
+          if (fetchSettled && fetchPayload) {
+            deliverAIResponse(fetchPayload.aiMessage, fetchPayload.isComplete)
+          }
         }
-        // else: fetchPayload.then will call deliverAIResponse when ready
-      }, true) // cancel any lingering TTS first
+        utt.onerror = () => { fillerFinished = true }
+        window.speechSynthesis.speak(utt)
+      } else {
+        fillerFinished = true
+      }
     },
     form.id,
   )
@@ -339,7 +372,18 @@ export default function FormSession({
     setSubmitting(true)
     try {
       const inputMethod = store.history.some(h => h.role === 'user' && h.text.includes('[Voice]')) ? 'voice' : 'text'
-      await submitResponse(form.id, inputMethod, store.answers, store.history)
+
+      // Convert audio Blobs to base64 strings (Blobs can't cross Server Action boundary)
+      const audioBlobsBase64: Record<string, string> = {}
+      await Promise.all(
+        Object.entries(store.audioBlobs).map(async ([fieldId, blob]) => {
+          const arrayBuffer = await blob.arrayBuffer()
+          const base64 = Buffer.from(arrayBuffer).toString('base64')
+          audioBlobsBase64[fieldId] = base64
+        })
+      )
+
+      await submitResponse(form.id, inputMethod, store.answers, store.history, audioBlobsBase64)
       playChime()
       store.setMode('success')
     } catch (e) {

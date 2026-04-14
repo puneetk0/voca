@@ -15,6 +15,7 @@ interface ConversationState {
   currentFieldIndex: number
   history: Message[]
   answers: Record<string, string> // field_id -> value
+  audioBlobs: Record<string, Blob> // field_id -> raw audio Blob (NOT persisted)
   mode: InputMode
   isAiTyping: boolean
   connectionLost: boolean
@@ -22,7 +23,9 @@ interface ConversationState {
   init: (formId: string, fields: any[]) => void
   setMode: (mode: InputMode) => void
   addMessage: (msg: Message) => void
+  replaceMessage: (id: string, newMsg: Message) => void
   setAnswer: (fieldId: string, value: string) => void
+  setAudioBlob: (fieldId: string, blob: Blob) => void
   setNextField: (idx: number) => void
   setIsAiTyping: (isTyping: boolean) => void
   setConnectionLost: (lost: boolean) => void
@@ -36,6 +39,7 @@ export const useConversationStore = create<ConversationState>()(
       currentFieldIndex: 0,
       history: [],
       answers: {},
+      audioBlobs: {},
       mode: 'choice',
       isAiTyping: false,
       connectionLost: false,
@@ -58,21 +62,25 @@ export const useConversationStore = create<ConversationState>()(
       }),
       setMode: (mode) => set({ mode }),
       addMessage: (msg) => set((state) => ({ history: [...state.history, msg] })),
+      replaceMessage: (id, newMsg) => set((state) => ({
+        history: state.history.map(m => m.id === id ? newMsg : m)
+      })),
       setAnswer: (fieldId, value) => set((state) => ({ answers: { ...state.answers, [fieldId]: value } })),
+      setAudioBlob: (fieldId, blob) => set((state) => ({ audioBlobs: { ...state.audioBlobs, [fieldId]: blob } })),
       setNextField: (idx) => set({ currentFieldIndex: idx }),
       setIsAiTyping: (isTyping) => set({ isAiTyping: isTyping }),
       setConnectionLost: (lost) => set({ connectionLost: lost }),
     }),
     {
-      name: 'voca-conversation', // localStorage key
-      // Only persist what's needed for recovery — not UI state
+      name: 'voca-conversation',
+      // Only persist what's needed for recovery — Blobs can't be serialized
       partialize: (state) => ({
         formId: state.formId,
         fields: state.fields,
         currentFieldIndex: state.currentFieldIndex,
         history: state.history,
         answers: state.answers,
-        mode: state.mode === 'success' ? 'success' : state.mode, // keep success state
+        mode: state.mode === 'success' ? 'success' : state.mode,
       }),
     }
   )

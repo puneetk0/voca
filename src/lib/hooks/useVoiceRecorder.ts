@@ -6,7 +6,7 @@ const MAX_SILENCE_MS = 2500        // 2.5s generous pause before auto-stop
 const VAD_INTERVAL_MS = 100        // check every 100ms
 const NOISE_CALIBRATION_MS = 500   // first 500ms = noise floor sampling
 
-export function useVoiceRecorder(onTranscription: (text: string) => void, formId: string) {
+export function useVoiceRecorder(onTranscription: (text: string, audioBlob: Blob) => void, formId: string) {
   const [isRecording, setIsRecording] = useState(false)
   const [isProcessing, setIsProcessing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -94,7 +94,7 @@ export function useVoiceRecorder(onTranscription: (text: string) => void, formId
           if (!res.ok) throw new Error(data.error)
 
           // Always pass the transcript (even if empty) so the UI guardrail can catch it
-          onTranscriptionRef.current(data.transcript || '')
+          onTranscriptionRef.current(data.transcript || '', audioBlob)
         } catch (e: any) {
           setError(e.message)
           console.error('Transcription failed:', e)

@@ -3,7 +3,8 @@ import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { CopyLinkButton } from '@/components/admin/CopyLinkButton'
 import { ExportCSVButton } from '@/components/admin/ExportCSVButton'
-import { ArrowLeft, Mic, Keyboard } from 'lucide-react'
+import ResponsesTable from '@/components/admin/ResponsesTable'
+import { ArrowLeft } from 'lucide-react'
 
 export default async function FormDashboard({ params }: { params: Promise<{ id: string }> }) {
   const supabase = await createClient()
@@ -36,7 +37,7 @@ export default async function FormDashboard({ params }: { params: Promise<{ id: 
   const responseIds = responses?.map(r => r.id) || []
   const { data: _answers } = await supabase
     .from('answers')
-    .select('response_id, field_id, value')
+    .select('response_id, field_id, value, audio_url')
     .in('response_id', responseIds)
 
   const answers = _answers || []
@@ -63,66 +64,16 @@ export default async function FormDashboard({ params }: { params: Promise<{ id: 
           />
         </div>
       </div>
-
       <div className="space-y-6">
         <h2 className="text-xl font-serif font-medium flex items-center gap-2">
           Submissions <span className="bg-foreground/10 text-xs px-2.5 py-0.5 rounded-full font-sans">{responses?.length || 0}</span>
         </h2>
-
-        {!responses || responses.length === 0 ? (
-          <div className="text-center py-16 border border-dashed border-foreground/10 rounded-2xl bg-foreground/[0.02]">
-            <p className="text-foreground/50 text-sm">No one has responded to this form yet.</p>
-            <p className="text-foreground/40 text-xs mt-1">Copy your link above and share it!</p>
-          </div>
-        ) : (
-          <div className="relative overflow-x-auto rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
-            <table className="w-full text-sm text-left whitespace-nowrap">
-              <thead className="bg-foreground/[0.03] text-foreground/60 border-b border-foreground/10 uppercase text-xs tracking-wider">
-                <tr>
-                  <th scope="col" className="px-6 py-4 font-medium">Date</th>
-                  <th scope="col" className="px-6 py-4 font-medium">Input</th>
-                  {fields?.map(field => (
-                    <th key={field.id} scope="col" className="px-6 py-4 font-medium max-w-[200px] truncate" title={field.label}>
-                      {field.label}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {responses.map((response) => (
-                  <tr key={response.id} className="border-b border-foreground/5 last:border-0 hover:bg-foreground/[0.04] transition-colors">
-                    <td className="px-6 py-4 text-foreground/70">
-                      {new Date(response.submitted_at).toLocaleDateString()}
-                    </td>
-                    <td className="px-6 py-4">
-                      {response.input_method === 'voice' ? (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-accent-sage/10 px-2.5 py-1 text-xs font-medium text-accent-sage ring-1 ring-inset ring-accent-sage/20">
-                          <Mic className="h-3 w-3" /> Voice
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 rounded-full bg-foreground/10 px-2.5 py-1 text-xs font-medium text-foreground/70 ring-1 ring-inset ring-foreground/20">
-                          <Keyboard className="h-3 w-3" /> Text
-                        </span>
-                      )}
-                    </td>
-                    {fields?.map(field => {
-                      const ans = answers.find(a => a.response_id === response.id && a.field_id === field.id)
-                      return (
-                        <td key={field.id} className="px-6 py-4 truncate max-w-[200px]" title={ans?.value || ''}>
-                          {ans ? (
-                            <span className="text-foreground">{ans.value}</span>
-                          ) : (
-                            <span className="text-foreground/30 italic">Skipped</span>
-                          )}
-                        </td>
-                      )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+        <ResponsesTable
+          formId={form.id}
+          fields={fields || []}
+          initialResponses={responses || []}
+          initialAnswers={answers}
+        />
       </div>
     </main>
   )
