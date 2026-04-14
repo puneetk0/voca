@@ -1,36 +1,58 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Voca: The Voice-First Form Builder
 
-## Getting Started
+Voca is a sophisticated, highly conversational AI-driven form generator and responder built with Next.js 14 (App Router). Instead of filling out rigid text fields, Voca allows users to literally speak with an AI to populate strict JSON data schemas dynamically.
 
-First, run the development server:
+## Core Features & Architecture
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+### 1. The Stack
+- **Framework**: Next.js 14, TailwindCSS
+- **Database**: Supabase (PostgreSQL), utilizing strictly isolated Row Level Security.
+- **State Management**: `zustand` (Manages fluid Voice/Text multimodal inputs in a single-page view).
+- **Core LLM Processing**: `@google/generative-ai` routing to **Gemini 2.5 Flash**.
+- **Speech-to-Text**: Groq Whisper API (for instant, low-latency audio processing).
+- **Text-to-Speech**: Browser Native Web Speech API (ensuring lightweight front-end fallbacks).
+- **Rate Limiting**: Upstash Redis (graceful sliding window rate limiting).
+
+### 2. Security First (Bring Your Own Key)
+Voca is built on a "Bring Your Own Key" (BYOK) paradigm to keep the service free. 
+- Form creators authenticate via Magic Link and input their own `Google Gemini` and `Groq` API credentials to power their forms.
+- These keys are encrypted in the Supabase `user_keys` table strictly guarded by Postgres RLS, and only executed server-side via the `service_role` key when responder submissions are parsed.
+
+### 3. Evading Serverless Timeouts
+Because LLM chaining and transcription takes > 10 seconds, Voca flawlessly navigates Vercel's Serverless Timeout constraints by strictly splitting the operations visually in the browser:
+1. Client browser records Audio using an iOS-safari compatible MP4 fallback constraint. 
+2. Voice blob uploads to `/api/transcribe` via Groq.
+3. Transcribed text is parsed and sent dynamically to `/api/converse` to interface with the Gemini logic. 
+
+## Folder Structure
+
+```
+├── supabase/
+│   └── schema.sql              # The core atomic DB architecture and RLS policies
+├── src/
+│   ├── app/
+│   │   ├── api/                # Core AI logic (converse, create-form, transcribe)
+│   │   ├── admin/              # Admin dashboard, Link generation, Settings
+│   │   ├── f/[id]/             # The Responder conversational UI client
+│   │   ├── login/              # Magic Link authentication 
+│   │   └── onboarding/         # BYOK setup wizard
+│   ├── lib/
+│   │   ├── actions/            # Secure Server Actions mapping DB operations 
+│   │   ├── hooks/              # Custom useVoiceRecorder abstraction
+│   │   └── store/              # Zustand conversation store
+│   └── components/
+│       ├── admin/              
+│       └── ui/
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Setup & Deployment Guide
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. **Locally:**
+   - Clone the repo.
+   - Run `npm install`
+   - Grab the schema located in `supabase/schema.sql` and run it in your remote Supabase Project SQL Editor.
+   - Duplicate `.env.example` into `.env.local` and substitute your actual Supabase URL and Keys.
+   - Run `npm run dev`.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+2. **Deploying to Vercel:**
+   - Standard Next.js deployment. Ensure you configure your environmental variables in the Vercel Dashboard mapping to your Supabase and optionally your Upstash Redis URLs!
