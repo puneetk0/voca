@@ -32,14 +32,19 @@ export async function POST(req: Request) {
 
     // 2. Fetch admin's Google TTS key
     const { data: keys } = await supabaseAdmin.from('user_keys').select('google_tts_key').eq('user_id', form.user_id).single()
-    
+
     // 3. Fallback if no key is provided
     if (!keys?.google_tts_key) {
       return NextResponse.json({ fallback: true })
     }
 
     // 4. Truncate text to 200 characters to prevent expensive hallucinations
-    const safeText = text.slice(0, 200)
+    let safeText = text.slice(0, 200);
+
+    safeText = safeText.replace(/,/g, '<break time="250ms"/>');
+    safeText = safeText.replace(/—/g, '<break time="400ms"/>');
+    safeText = safeText.replace(/\.\.\./g, '<break time="500ms"/>');
+    const ssmlPayload = `<speak>${safeText}</speak>`;
 
     // 5. Call Google Cloud TTS API
     const googleRes = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${keys.google_tts_key}`, {
@@ -48,9 +53,16 @@ export async function POST(req: Request) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        input: { text: safeText },
-        voice: { languageCode: 'en-IN', name: 'en-IN-Wavenet-D' }, 
-        audioConfig: { audioEncoding: 'MP3', speakingRate: 1.1 }
+        input: { ssml: ssmlPayload }, // CHANGED: Using ssml instead of text
+        voice: {
+          languageCode: 'en-IN',
+          name: 'en-IN-Neural2-C' // CHANGED: Neural2 is vastly superior to Wavenet
+        },
+        audioConfig: {
+          audioEncoding: 'MP3',
+          speakingRate: 1.2, // Slightly faster than default feels more conversational
+          pitch: -2.0 // Lowering the pitch slightly removes the "squeaky robot" edge
+        }
       })
     })
 
