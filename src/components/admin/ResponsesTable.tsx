@@ -1,8 +1,8 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Mic, Keyboard, Volume2 } from 'lucide-react'
+import { Mic, Keyboard, PlayCircle, PauseCircle, Loader2 } from 'lucide-react'
 
 interface Field { id: string; label: string; order_index: number }
 interface Answer { response_id: string; field_id: string; value: string; audio_url?: string | null }
@@ -13,6 +13,71 @@ interface Props {
   fields: Field[]
   initialResponses: Response[]
   initialAnswers: Answer[]
+}
+
+function MinimalAudioPlayer({ url }: { url: string }) {
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current = null
+      }
+    }
+  }, [])
+
+  const togglePlay = () => {
+    if (isPlaying && audioRef.current) {
+      audioRef.current.pause()
+      setIsPlaying(false)
+      return
+    }
+
+    if (!audioRef.current) {
+      setIsLoading(true)
+      const audio = new Audio(url)
+      
+      audio.oncanplay = () => {
+        setIsLoading(false)
+        audio.play()
+      }
+      
+      audio.onplay = () => setIsPlaying(true)
+      audio.onpause = () => setIsPlaying(false)
+      audio.onended = () => setIsPlaying(false)
+      audio.onerror = () => {
+        setIsLoading(false)
+        setIsPlaying(false)
+      }
+      
+      audioRef.current = audio
+      
+      // Attempt play immediately, helps bypass some stricter mobile protections if buffered quickly
+      audio.play().catch(() => {})
+    } else {
+      audioRef.current.play()
+    }
+  }
+
+  return (
+    <button
+      onClick={togglePlay}
+      disabled={isLoading}
+      title="Listen to response"
+      className="shrink-0 flex items-center justify-center rounded-full p-1 bg-accent-sage/10 text-accent-sage hover:bg-accent-sage/20 transition-colors ring-1 ring-inset ring-accent-sage/20"
+    >
+      {isLoading ? (
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+      ) : isPlaying ? (
+        <PauseCircle className="h-3.5 w-3.5 fill-accent-sage text-black" />
+      ) : (
+        <PlayCircle className="h-3.5 w-3.5 fill-accent-sage text-black" />
+      )}
+    </button>
+  )
 }
 
 export default function ResponsesTable({ formId, fields, initialResponses, initialAnswers }: Props) {
@@ -103,15 +168,7 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
                       <div className="flex items-center gap-2">
                         <span className="text-foreground truncate" title={ans.value}>{ans.value}</span>
                         {ans.audio_url && (
-                          <a
-                            href={ans.audio_url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            title="Listen to this answer"
-                            className="shrink-0 text-accent-sage/70 hover:text-accent-sage transition-colors"
-                          >
-                            <Volume2 className="h-3.5 w-3.5" />
-                          </a>
+                          <MinimalAudioPlayer url={ans.audio_url} />
                         )}
                       </div>
                     ) : (

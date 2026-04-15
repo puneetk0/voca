@@ -1,15 +1,13 @@
 'use server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 
-export async function submitResponse(
-  formId: string, 
-  inputMethod: 'voice' | 'text', 
-  answers: Record<string, string>,
-  history: any[],
-  // Audio blobs serialized to base64 on the client (Blobs can't cross Server Action boundary)
-  audioBlobsBase64?: Record<string, string>
-) {
+export async function submitResponse(formData: FormData) {
   const supabase = supabaseAdmin
+
+  const formId = formData.get('formId') as string
+  const inputMethod = formData.get('inputMethod') as string
+  const answers = JSON.parse(formData.get('answers') as string)
+  const history = JSON.parse(formData.get('history') as string)
 
   // 1. Insert Response
   const { data: response, error: responseErr } = await supabase
@@ -20,20 +18,28 @@ export async function submitResponse(
 
   if (responseErr) throw new Error(responseErr.message)
 
+  // Extract all audio blobs from formData
+  const audioBlobs: Record<string, Blob> = {}
+  for (const [key, value] of formData.entries()) {
+    if (key.startsWith('audio_') && value instanceof Blob) {
+      const fieldId = key.replace('audio_', '')
+      audioBlobs[fieldId] = value
+    }
+  }
+
   // 2. Insert Answers (with optional audio URLs)
   const answersToInsert = await Promise.all(
     Object.entries(answers).map(async ([field_id, value]) => {
       let audio_url: string | null = null
 
       // 2a. Try to upload audio if we have a blob for this field
-      if (audioBlobsBase64?.[field_id]) {
+      if (audioBlobs[field_id]) {
         try {
-          const base64 = audioBlobsBase64[field_id]
-          // Strip data URL prefix if present (e.g. "data:audio/webm;base64,...")
-          const base64Data = base64.includes(',') ? base64.split(',')[1] : base64
-          const buffer = Buffer.from(base64Data, 'base64')
+          const blob = audioBlobs[field_id]
+          const arrayBuffer = await blob.arrayBuffer()
+          const buffer = Buffer.from(arrayBuffer)
 
-          const fileName = `${response.id}_${field_id}.webm`
+          const fileName = `${response.id}/${field_id}_${Date.now()}.webm`
           const { error: uploadErr } = await supabase.storage
             .from('audio_submissions')
             .upload(fileName, buffer, { contentType: 'audio/webm', upsert: true })
@@ -53,7 +59,7 @@ export async function submitResponse(
         }
       }
 
-      return { response_id: response.id, field_id, value, audio_url }
+      return { response_id: response.id, field_id, value: value as string, audio_url }
     })
   )
 

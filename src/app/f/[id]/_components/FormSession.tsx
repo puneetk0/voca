@@ -377,17 +377,17 @@ export default function FormSession({
     try {
       const inputMethod = store.history.some(h => h.role === 'user' && h.text.includes('[Voice]')) ? 'voice' : 'text'
 
-      // Convert audio Blobs to base64 strings (Blobs can't cross Server Action boundary)
-      const audioBlobsBase64: Record<string, string> = {}
-      await Promise.all(
-        Object.entries(store.audioBlobs).map(async ([fieldId, blob]) => {
-          const arrayBuffer = await blob.arrayBuffer()
-          const base64 = Buffer.from(arrayBuffer).toString('base64')
-          audioBlobsBase64[fieldId] = base64
-        })
-      )
+      const formData = new FormData()
+      formData.append('formId', form.id)
+      formData.append('inputMethod', inputMethod)
+      formData.append('answers', JSON.stringify(store.answers))
+      formData.append('history', JSON.stringify(store.history))
 
-      await submitResponse(form.id, inputMethod, store.answers, store.history, audioBlobsBase64)
+      Object.entries(store.audioBlobs).forEach(([fieldId, audioBlob]) => {
+        formData.append(`audio_${fieldId}`, audioBlob as Blob, `${fieldId}.webm`)
+      })
+
+      await submitResponse(formData)
       playChime()
       store.setMode('success')
     } catch (e) {
