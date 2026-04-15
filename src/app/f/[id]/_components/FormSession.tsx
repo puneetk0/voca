@@ -243,11 +243,17 @@ export default function FormSession({
     if (data.nextFieldIndex !== undefined) store.setNextField(data.nextFieldIndex)
 
     if (data.aiMessage) {
-      store.replaceMessage('__ai_thinking__', {
+      const existingPlaceholder = store.history.some(m => m.id === '__ai_thinking__')
+      const newMsg = {
         id: Date.now().toString(),
-        role: 'ai',
+        role: 'ai' as const,
         text: data.aiMessage,
-      })
+      }
+      if (existingPlaceholder) {
+        store.replaceMessage('__ai_thinking__', newMsg)
+      } else {
+        store.addMessage(newMsg)
+      }
     }
 
     store.setIsAiTyping(false)
@@ -318,35 +324,17 @@ export default function FormSession({
     if (recorderError) setVoiceState('error')
   }, [isRecording, isProcessing, recorderError])
 
-  useEffect(() => {
-    if ((store.mode === 'text' || store.mode === 'voice') && store.history.length === 0) {
-      handleInitialSequence(store.mode as 'text' | 'voice')
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [store.mode])
-
+  // Start sequence based on explicit user gesture (onClick)
   async function handleInitialSequence(mode: 'text' | 'voice') {
     if (mode === 'voice') {
       try {
         // Step 1: Request mic permission
         const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
         tempStream.getTracks().forEach(t => t.stop())
-
-        // Step 2: Create Audio element NOW, on this user gesture.
-        // This is the critical fix for iOS autoplay policy.
-        // An Audio element created outside a user gesture is blocked by Safari.
-        // Creating it here (synchronously within the gesture handler) primes it
-        // so subsequent .play() calls will succeed.
-        if (!audioRef.current) {
-          audioRef.current = new Audio()
-          // Play a silent 0-second audio to fully unlock the audio context on iOS
-          audioRef.current.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
-          await audioRef.current.play().catch(() => { })
-          audioRef.current.src = ''
-        }
       } catch (err) {
         // Mic blocked — fall back to text
         store.setMode('text')
+        handleInitialSequence('text')
         return
       }
       setVoiceState('thinking')
@@ -356,6 +344,8 @@ export default function FormSession({
     const prefillNote = prefillEntries.length > 0
       ? `Note: You already know the following about this user from the URL: ${prefillEntries.map(([k, v]) => `${k}=${v}`).join(', ')}. Acknowledge this naturally and ask for the first MISSING field.`
       : ''
+
+    store.addMessage({ id: '__ai_thinking__', role: 'ai', text: 'Setting things up...' })
 
     await handleConverseResponse('Hello', 0, mode, (aiMessage) => {
       if (mode === 'voice') {
@@ -371,6 +361,11 @@ export default function FormSession({
     const userMsg = inputText.trim()
     setInputText('')
     store.addMessage({ id: Date.now().toString(), role: 'user', text: userMsg })
+    store.addMessage({
+      id: '__ai_thinking__',
+      role: 'ai',
+      text: getThinkingLabel(fields[store.currentFieldIndex]?.field_type || 'text', userMsg)
+    })
     const fieldIndex = store.currentFieldIndex
     await handleConverseResponse(userMsg, fieldIndex, 'text', (_, isComplete) => {
       if (isComplete) setTimeout(() => store.setMode('review'), 2000)
@@ -459,14 +454,28 @@ export default function FormSession({
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto">
             <button
-              onClick={() => store.setMode('voice')}
+              onClick={() => {
+                // Step 2: Create Audio element NOW, synchronously on this user gesture.
+                // This is the critical fix for iOS autoplay policy.
+                if (!audioRef.current) {
+                  audioRef.current = new Audio()
+                  audioRef.current.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+                  audioRef.current.play().catch(() => { })
+                  audioRef.current.src = ''
+                }
+                store.setMode('voice')
+                handleInitialSequence('voice')
+              }}
               className="group flex flex-col items-center justify-center gap-4 p-8 rounded-3xl bg-accent-amber/10 text-accent-amber hover:bg-accent-amber/20 border border-accent-amber/20 transition-all font-medium h-[200px]"
             >
               <Mic className="h-10 w-10 group-hover:scale-110 transition-transform" />
               <span className="text-lg">Talk with me</span>
             </button>
             <button
-              onClick={() => store.setMode('text')}
+              onClick={() => {
+                store.setMode('text')
+                handleInitialSequence('text')
+              }}
               className="group flex flex-col items-center justify-center gap-4 p-8 rounded-3xl bg-foreground/[0.03] text-foreground hover:bg-foreground/[0.05] border border-foreground/10 transition-all font-medium h-[200px]"
             >
               <Keyboard className="h-10 w-10 group-hover:scale-110 transition-transform text-foreground/50" />

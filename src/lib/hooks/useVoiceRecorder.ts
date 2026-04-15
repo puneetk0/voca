@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 // Tightened from 3500ms → 1800ms. 3.5s felt broken; 1.8s is snappy but
 // still forgiving enough for natural speech pauses mid-sentence.
 const SILENCE_THRESHOLD = 12          // baseline floor (RMS out of ~128)
-const MAX_SILENCE_MS = 1800           // 1.8s pause → auto-stop
+const MAX_SILENCE_MS = 2800          // 1.8s pause → auto-stop
 const VAD_INTERVAL_MS = 80            // check every 80ms (was 100ms, slightly more responsive)
 const NOISE_CALIBRATION_MS = 600      // first 600ms = ambient noise sampling
 // Multiplier reduced from 1.5 → 1.25. 1.5 was too generous in noisy environments
