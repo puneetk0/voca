@@ -47,14 +47,6 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
     if (validation.groqError) setGroqError(validation.groqError)
     if (validation.googleTTSError) setGoogleTTSError(validation.googleTTSError)
 
-    // Pair validation: both TTS key and Project ID must be set together, or neither
-    const hasGCPKey = !!googleTTSKey
-    const hasGCPProject = !!gcpProjectId
-    if (hasGCPKey !== hasGCPProject) {
-      setStatus('error')
-      setErrorMessage('Google Cloud API Key and Project ID must both be set together.')
-      return
-    }
 
     if (!validation.gemini || !validation.groq || (googleTTSKey && !validation.googleTTS)) {
       setStatus('error')
@@ -141,21 +133,6 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
             />
           </div>
 
-          {/* GCP Project ID */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label htmlFor="gcp_project_id" className="block text-sm font-medium">GCP Project ID</label>
-            </div>
-            <input
-              id="gcp_project_id"
-              type="text"
-              value={gcpProjectId}
-              onChange={(e) => setGcpProjectId(e.target.value)}
-              placeholder="voca-forms-123456"
-              className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm font-mono text-sm"
-            />
-            <p className="mt-1.5 text-xs text-foreground/40">Found in the GCP Console top-left dropdown. Required alongside the API key.</p>
-          </div>
         </div>
       </div>
 

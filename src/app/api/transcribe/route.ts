@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     }
 
     // 1. Resolve user keys
-    let keys: { groq_key?: string | null; google_tts_key?: string | null; gcp_project_id?: string | null } | null = null
+    let keys: { groq_key?: string | null; google_tts_key?: string } | null = null
 
     if (formId) {
       // Responder path: look up keys via form owner
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
       if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
       const { data } = await supabaseAdmin
         .from('user_keys')
-        .select('groq_key, google_tts_key, gcp_project_id')
+        .select('groq_key, google_tts_key')
         .eq('user_id', form.user_id)
         .single()
       keys = data
@@ -49,7 +49,7 @@ export async function POST(req: Request) {
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
       const { data } = await supabaseAdmin
         .from('user_keys')
-        .select('groq_key, google_tts_key, gcp_project_id')
+        .select('groq_key, google_tts_key')
         .eq('user_id', user.id)
         .single()
       keys = data

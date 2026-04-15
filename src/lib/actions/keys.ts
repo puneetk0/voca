@@ -7,7 +7,7 @@ export async function saveUserKeys(geminiKey: string, groqKey: string, googleTTS
   try {
     const supabase = await createClient()
     const { data: { user } } = await supabase.auth.getUser()
-    
+
     if (!user) {
       throw new Error('Not authenticated')
     }
@@ -20,12 +20,11 @@ export async function saveUserKeys(geminiKey: string, groqKey: string, googleTTS
 
     const { error } = await supabaseAdmin
       .from('user_keys')
-      .upsert({ 
-        user_id: user.id, 
-        gemini_key: geminiKey, 
+      .upsert({
+        user_id: user.id,
+        gemini_key: geminiKey,
         groq_key: groqKey,
         google_tts_key: googleTTSKey || null,
-        gcp_project_id: gcpProjectId || null
       })
 
     if (error) {
