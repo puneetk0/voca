@@ -63,6 +63,14 @@ export default function FormSession({
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const typewriterRef = useRef<TypewriterHandle>(null)
 
+  // Guard refs to prevent VAD race conditions:
+  // isSpeakingRef: true while TTS audio is playing — prevents VAD-triggered startRecording
+  //                from racing with the TTS onEnd startRecording call
+  // isHandlingTranscriptRef: true while one transcription response is in-flight —
+  //                prevents a second VAD auto-stop from firing a duplicate converse call
+  const isSpeakingRef = useRef(false)
+  const isHandlingTranscriptRef = useRef(false)
+
   const playChime = () => {
     try {
       const AudioContext = window.AudioContext || (window as any).webkitAudioContext
@@ -105,7 +113,10 @@ export default function FormSession({
   }, [store.history, store.isAiTyping, store.mode])
 
   // --- TTS --- (Premium Google TTS with Native Fallback)
+  // isSpeakingRef is set to true for the entire duration of TTS playback.
+  // This blocks any VAD-triggered startRecording from firing while the AI is talking.
   const playSmartAudio = useCallback(async (text: string, onEnd: () => void, cancelFirst = true) => {
+    isSpeakingRef.current = true
     setVoiceState('speaking')
     
     if (cancelFirst) {
@@ -116,8 +127,12 @@ export default function FormSession({
       }
     }
 
+    const handleEnd = () => {
+      isSpeakingRef.current = false
+      onEnd()
+    }
+
     try {
-      // 1. Try to fetch premium audio
       const res = await fetch('/api/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -125,39 +140,25 @@ export default function FormSession({
       })
       const data = await res.json()
 
-      // 2. Fallback routing
-      if (data.fallback || data.error) {
-         throw new Error("Use native browser TTS")
-      }
+      if (data.fallback || data.error) throw new Error('Use native browser TTS')
 
-      // 3. Play Premium Audio
-      // If we don't already have an audio object, create one.
       const audioToPlay = audioRef || new Audio()
       audioToPlay.src = `data:audio/mp3;base64,${data.audioContent}`
-      
-      const handleEnded = () => {
-        setAudioRef(null)
-        onEnd()
-      }
-      audioToPlay.onended = handleEnded
-      audioToPlay.onerror = handleEnded
-      
+      audioToPlay.onended = handleEnd
+      audioToPlay.onerror = handleEnd
       setAudioRef(audioToPlay)
       await audioToPlay.play()
 
     } catch (e) {
-      // 4. Native Browser Fallback (If no key, or network fails)
-      if (!('speechSynthesis' in window)) { onEnd(); return }
+      // Native Browser Fallback
+      if (!('speechSynthesis' in window)) { isSpeakingRef.current = false; onEnd(); return }
       const utterance = new SpeechSynthesisUtterance(text)
-      
-      // Attempt to grab an Indian/Google voice if available on the device
       const voices = window.speechSynthesis.getVoices()
       const preferredVoice = voices.find(v => v.lang.includes('en-IN') || v.name.includes('Google'))
       if (preferredVoice) utterance.voice = preferredVoice
-      
       utterance.rate = 1.05
-      utterance.onend = onEnd
-      utterance.onerror = () => onEnd()
+      utterance.onend = handleEnd
+      utterance.onerror = () => { isSpeakingRef.current = false; onEnd() }
       window.speechSynthesis.speak(utterance)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -247,12 +248,25 @@ export default function FormSession({
   // --- VOICE LOGIC ---
   const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream } = useVoiceRecorder(
     async (transcript, audioBlob) => {
-      // Guardrail: If they sneezed, or if Whisper picked up a 1-letter static pop, don't confuse the LLM
+      // Guard 1: Don't process if the AI is currently speaking.
+      // This handles the race where VAD auto-stops during the filler phrase playback.
+      if (isSpeakingRef.current) return
+
+      // Guard 2: Don't process if we're already handling a transcription.
+      // This handles rapid VAD double-fires from bouncing audio levels.
+      if (isHandlingTranscriptRef.current) return
+      isHandlingTranscriptRef.current = true
+
       const cleanTranscript = transcript.trim()
+
+      // Short-circuit for empty/noise captures — replay the last question
       if (cleanTranscript.length < 2) {
-        playSmartAudio("Sorry, I didn't quite catch that. Could you repeat?", () => {
-          setVoiceState('listening')
+        const lastAiMessage = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text
+        const reprompt = lastAiMessage || "Sorry, I didn't quite catch that. Could you try again?"
+        playSmartAudio(reprompt, () => {
+          setVoiceState('idle')
           startRecording()
+          isHandlingTranscriptRef.current = false
         }, true)
         return
       }
@@ -260,43 +274,34 @@ export default function FormSession({
       const fieldIndex = store.currentFieldIndex
       const currentField = fields[fieldIndex]
 
-      // 5.2: Save blob for this field so it can be uploaded on form submit
       if (audioBlob) store.setAudioBlob(currentField.id, audioBlob)
 
-      // 5.3 Optimistic UI step 1: instantly push user message
+      // Optimistic UI: push user message and thinking placeholder
       store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Voice] ${cleanTranscript}` })
-
-      // 5.3 Optimistic UI step 2: push a "thinking" placeholder immediately
-      store.addMessage({
-        id: '__ai_thinking__',
-        role: 'ai',
-        text: getThinkingLabel(currentField?.field_type || 'text', cleanTranscript)
-      })
+      store.addMessage({ id: '__ai_thinking__', role: 'ai', text: getThinkingLabel(currentField?.field_type || 'text', cleanTranscript) })
       setVoiceState('thinking')
 
-      // 5.3 Optimistic UI step 3: speak filler locally (native TTS, no network round-trip)
+      // Speak filler immediately via NATIVE TTS while Gemini is working
       const fillerText = FILLERS[Math.floor(Math.random() * FILLERS.length)]
       let fetchSettled = false
       let fetchPayload: { aiMessage: string; isComplete: boolean } | null = null
       let fillerFinished = false
 
-      // Deliver the real AI response — called from whichever settles last
       function deliverAIResponse(aiMessage: string, isComplete: boolean) {
         playSmartAudio(aiMessage, () => {
+          isHandlingTranscriptRef.current = false
           setVoiceState('idle')
           if (!isComplete) startRecording()
           else store.setMode('review')
-        }, false) // false = don't cancel filler
+        }, false)
       }
 
-      // Start the API fetch concurrently
       handleConverseResponse(cleanTranscript, fieldIndex, 'voice', (aiMessage, isComplete) => {
         fetchSettled = true
         fetchPayload = { aiMessage, isComplete }
         if (fillerFinished) deliverAIResponse(aiMessage, isComplete)
       })
 
-      // Speak filler via NATIVE TTS immediately (no network wait)
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel()
         const utt = new SpeechSynthesisUtterance(fillerText)
@@ -304,9 +309,7 @@ export default function FormSession({
         utt.onend = () => {
           fillerFinished = true
           setVoiceState('thinking')
-          if (fetchSettled && fetchPayload) {
-            deliverAIResponse(fetchPayload.aiMessage, fetchPayload.isComplete)
-          }
+          if (fetchSettled && fetchPayload) deliverAIResponse(fetchPayload.aiMessage, fetchPayload.isComplete)
         }
         utt.onerror = () => { fillerFinished = true }
         window.speechSynthesis.speak(utt)
@@ -445,71 +448,94 @@ export default function FormSession({
   }
 
   if (store.mode === 'voice') {
+    // The last AI message is the question currently being asked
+    const lastAiText = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text ?? ''
+
+    // Orb colour communicates state — no text labels needed
+    const orbColour = voiceState === 'speaking'
+      ? 'bg-accent-amber shadow-[0_0_60px_rgba(245,158,11,0.25)]'
+      : voiceState === 'listening'
+      ? 'bg-accent-sage shadow-[0_0_60px_rgba(132,204,22,0.25)]'
+      : voiceState === 'error'
+      ? 'bg-red-500/80'
+      : 'bg-foreground/15'
+
     return (
-      <main className="min-h-[100dvh] flex flex-col items-center justify-center p-6 bg-background relative overflow-hidden">
+      <main className="min-h-[100dvh] flex flex-col items-center justify-between p-6 pt-safe pb-safe bg-background overflow-hidden">
         <ConnectionLostToast />
-        <div className={`absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 rounded-full blur-[100px] transition-colors duration-1000 -z-10 ${voiceState === 'speaking' ? 'bg-accent-amber/10' : voiceState === 'listening' ? 'bg-accent-sage/10' : 'bg-transparent'}`} />
 
-        <motion.div animate={{ opacity: 1 }} initial={{ opacity: 0 }} className="text-center w-full max-w-md mx-auto">
-          <div className="h-48 w-48 mx-auto mb-12 relative flex items-center justify-center">
-            {voiceState === 'listening' && (
-              <motion.button onClick={stopRecording}
-                initial={{ scale: 0.8 }} animate={{ scale: [1, 1.05, 1] }} transition={{ repeat: Infinity, duration: 1.5 }}
-                className="absolute inset-0 bg-accent-sage rounded-full flex flex-col items-center justify-center shadow-[0_0_40px_rgba(132,204,22,0.3)] hover:scale-95 transition-transform"
+        {/* Ambient background glow */}
+        <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] rounded-full blur-[120px] -z-10 transition-colors duration-1000 ${
+          voiceState === 'speaking' ? 'bg-accent-amber/8' : voiceState === 'listening' ? 'bg-accent-sage/8' : 'bg-transparent'
+        }`} />
+
+        {/* Top spacer */}
+        <div />
+
+        {/* Centre content */}
+        <motion.div animate={{ opacity: 1 }} initial={{ opacity: 0 }} className="flex flex-col items-center gap-10 w-full max-w-sm mx-auto">
+
+          {/* The only text on screen — current question */}
+          <AnimatePresence mode="wait">
+            {lastAiText && (
+              <motion.p
+                key={lastAiText}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.3 }}
+                className="font-serif text-2xl sm:text-3xl text-center leading-snug text-foreground px-2"
               >
-                <div className="mb-3">
+                {lastAiText.replace('[Voice]', '')}
+              </motion.p>
+            )}
+          </AnimatePresence>
+
+          {/* Orb — tap to stop when listening */}
+          <div className="relative flex items-center justify-center" style={{ width: 140, height: 140 }}>
+            {/* Pulse ring — only during listening */}
+            {voiceState === 'listening' && (
+              <motion.div
+                className="absolute inset-0 rounded-full bg-accent-sage/30"
+                animate={{ scale: [1, 1.35, 1], opacity: [0.6, 0, 0.6] }}
+                transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
+              />
+            )}
+
+            {/* Waveform inside orb when listening */}
+            <motion.button
+              onClick={() => {
+                if (voiceState === 'listening') stopRecording()
+              }}
+              className={`relative z-10 w-[140px] h-[140px] rounded-full flex flex-col items-center justify-center transition-colors duration-500 ${orbColour}`}
+              animate={voiceState === 'thinking' || voiceState === 'transcribing' ? { scale: [0.97, 1, 0.97], opacity: [0.6, 1, 0.6] } : { scale: 1, opacity: 1 }}
+              transition={{ repeat: voiceState === 'thinking' || voiceState === 'transcribing' ? Infinity : 0, duration: 1.4 }}
+            >
+              {voiceState === 'listening' && (
+                <>
                   <Waveform stream={stream} isActive={isRecording} color="#000" />
-                </div>
-                <Square className="h-7 w-7 text-black fill-black" />
-              </motion.button>
-            )}
-            {voiceState === 'speaking' && (
-              <motion.div animate={{ scale: [1, 1.2, 1] }} transition={{ repeat: Infinity, duration: 2 }}
-                className="absolute inset-0 bg-accent-amber rounded-full flex items-center justify-center shadow-[0_0_40px_rgba(245,158,11,0.3)]"
-              />
-            )}
-            {voiceState === 'thinking' && (
-              <motion.div animate={{ scale: [0.95, 1], opacity: [0.5, 1, 0.5] }} transition={{ repeat: Infinity, duration: 1.5 }}
-                className="absolute inset-4 bg-foreground/20 rounded-full"
-              />
-            )}
-            {voiceState === 'transcribing' && (
-              <div className="absolute inset-0 border-4 border-foreground/10 border-t-foreground/50 rounded-full animate-spin" />
-            )}
-            {voiceState === 'error' && (
-              <div className="absolute inset-0 bg-red-500/10 rounded-full flex items-center justify-center">
-                <WifiOff className="h-12 w-12 text-red-400" />
-              </div>
-            )}
+                  <Square className="h-5 w-5 text-black fill-black mt-2 opacity-70" />
+                </>
+              )}
+              {voiceState === 'error' && <WifiOff className="h-8 w-8 text-white" />}
+            </motion.button>
           </div>
 
-          <div className="h-12 flex items-center justify-center">
-            {voiceState === 'listening' && <p className="font-serif text-xl text-accent-sage">Listening...</p>}
-            {voiceState === 'speaking' && <p className="font-serif text-xl text-accent-amber">Speaking...</p>}
-            {voiceState === 'thinking' && <p className="font-serif text-xl text-foreground/50 animate-pulse">Thinking...</p>}
-            {voiceState === 'transcribing' && <p className="font-serif text-xl text-foreground/50">Transcribing...</p>}
-            {voiceState === 'error' && <p className="font-serif text-xl text-red-500">AI is sleeping. Switching to text...</p>}
-          </div>
-
-          <div className="mt-8 h-24 overflow-hidden">
-            {store.history.slice(-2).map((msg) => (
-              <div key={msg.id} className={`mb-2 font-serif text-lg ${msg.role === 'ai' ? 'text-foreground' : 'text-foreground/40'}`}>
-                {msg.text.replace('[Voice]', '')}
-              </div>
-            ))}
-          </div>
-
-          <button onClick={() => { 
-            window.speechSynthesis.cancel(); 
-            if (audioRef) { audioRef.pause(); audioRef.currentTime = 0; }
-            stopRecording(); 
-            store.setMode('text'); 
-          }}
-            className="mt-12 text-sm text-foreground/40 hover:text-foreground/80 transition-colors"
-          >
-            Switch to Keyboard
-          </button>
         </motion.div>
+
+        {/* Bottom escape hatch */}
+        <button
+          onClick={() => {
+            isSpeakingRef.current = false
+            window.speechSynthesis.cancel()
+            if (audioRef) { audioRef.pause(); audioRef.currentTime = 0 }
+            stopRecording()
+            store.setMode('text')
+          }}
+          className="text-sm text-foreground/30 hover:text-foreground/60 transition-colors py-2"
+        >
+          Switch to keyboard
+        </button>
       </main>
     )
   }

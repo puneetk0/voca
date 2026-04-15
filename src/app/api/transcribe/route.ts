@@ -78,7 +78,6 @@ export async function POST(req: Request) {
             config: {
               // This is the line that was missing. Without it, you were using
               // the default "latest_long" model, not Chirp 2.
-              model: 'chirp',
               languageCode: 'en-IN',
               // Hinglish support — Chirp 2 handles code-switching natively
               alternativeLanguageCodes: ['hi-IN'],
