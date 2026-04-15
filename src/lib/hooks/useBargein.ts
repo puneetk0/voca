@@ -1,9 +1,16 @@
 import { useEffect, useRef } from 'react'
 
-const BARGE_IN_THRESHOLD = 40   // must be louder than ambient (out of 255)
-const DEAF_WINDOW_MS = 500      // ignore first 500ms (echo cancellation calibration)
-const CHECK_INTERVAL_MS = 80    // check every 80ms
-const SUSTAIN_CHECKS = 2        // must sustain for 2 consecutive ticks (~160ms)
+// Consistent with useVoiceRecorder — both use time-domain RMS now.
+// The old code used getByteFrequencyData here but getByteTimeDomainData in the VAD,
+// which meant thresholds were calibrated for completely different scales.
+// Frequency data: 0-255 representing dB per spectral bin (very sensitive to noise)
+// Time-domain RMS: actual waveform amplitude (what we actually want)
+const BARGE_IN_RMS_THRESHOLD = 18     // RMS units — tuned to match VAD scale
+const DEAF_WINDOW_MS = 600            // slightly longer than before — echo cancellation
+// needs a beat to calibrate after TTS starts
+const CHECK_INTERVAL_MS = 80
+const SUSTAIN_CHECKS = 3              // ~240ms of sustained speech before triggering
+// (was 2 = 160ms — too easy to false-trigger)
 
 interface UseBargeinOptions {
   enabled: boolean
@@ -12,8 +19,8 @@ interface UseBargeinOptions {
 
 /**
  * Keeps a "hot" mic stream running while the AI is speaking.
- * If a sustained volume spike is detected (and we're past the deaf window),
- * calls onBargeIn() so FormSession can cancel TTS and start recording.
+ * Listens for sustained RMS above threshold and calls onBargeIn().
+ * Uses the same time-domain RMS calculation as useVoiceRecorder for consistency.
  */
 export function useBargein({ enabled, onBargeIn }: UseBargeinOptions) {
   const onBargeInRef = useRef(onBargeIn)
@@ -36,72 +43,88 @@ export function useBargein({ enabled, onBargeIn }: UseBargeinOptions) {
     let sustained = 0
     const startTime = Date.now()
 
-    ;(async () => {
-      try {
-        // Open a dedicated ambient stream with full hardware echo cancellation
-        const ambientStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: false, // keep raw levels for threshold detection
-          },
-        })
+      ; (async () => {
+        try {
+          const ambientStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: false, // raw levels needed for threshold detection
+            },
+          })
 
-        if (!active) {
-          ambientStream.getTracks().forEach(t => t.stop())
-          return
-        }
+          if (!active) {
+            ambientStream.getTracks().forEach(t => t.stop())
+            return
+          }
 
-        const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext
-        audioCtx = new AudioCtxClass()
-        const analyser = audioCtx.createAnalyser()
-        analyser.fftSize = 256
-        const source = audioCtx.createMediaStreamSource(ambientStream)
-        source.connect(analyser)
+          const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext
+          audioCtx = new AudioCtxClass()
 
-        const data = new Uint8Array(analyser.frequencyBinCount)
+          // Resume if suspended (iOS Safari always starts AudioContext suspended)
+          if (audioCtx.state === 'suspended') {
+            await audioCtx.resume()
+          }
 
-        intervalId = setInterval(() => {
-          if (!active) return
+          const analyser = audioCtx.createAnalyser()
+          analyser.fftSize = 256
+          const source = audioCtx.createMediaStreamSource(ambientStream)
+          source.connect(analyser)
 
-          // Deaf window: ignore first 500ms so echo cancellation can calibrate
-          if (Date.now() - startTime < DEAF_WINDOW_MS) return
+          // Time-domain buffer — consistent with useVoiceRecorder
+          const dataArray = new Uint8Array(analyser.frequencyBinCount)
 
-          analyser.getByteFrequencyData(data)
-          const maxVol = Math.max(...Array.from(data))
-
-          if (maxVol > BARGE_IN_THRESHOLD) {
-            sustained++
-            if (sustained >= SUSTAIN_CHECKS) {
-              // Confirmed barge-in — fire and tear down
-              active = false
-              if (cleanupRef.current) cleanupRef.current()
-              onBargeInRef.current()
+          const doCleanup = () => {
+            active = false
+            if (intervalId) { clearInterval(intervalId); intervalId = null }
+            ambientStream.getTracks().forEach(t => t.stop())
+            if (audioCtx && audioCtx.state !== 'closed') {
+              audioCtx.close().catch(() => { })
             }
-          } else {
-            sustained = 0
+            audioCtx = null
           }
-        }, CHECK_INTERVAL_MS)
 
-        cleanupRef.current = () => {
-          active = false
-          if (intervalId) { clearInterval(intervalId); intervalId = null; }
-          ambientStream.getTracks().forEach(t => t.stop())
-          if (audioCtx && audioCtx.state !== 'closed') {
-            audioCtx.close().catch(() => {})
-          }
-          audioCtx = null
+          cleanupRef.current = doCleanup
+
+          intervalId = setInterval(() => {
+            if (!active) return
+            if (Date.now() - startTime < DEAF_WINDOW_MS) return
+
+            // Time-domain RMS — same calculation as useVoiceRecorder VAD
+            analyser.getByteTimeDomainData(dataArray)
+            let sum = 0
+            for (let i = 0; i < dataArray.length; i++) {
+              const amplitude = dataArray[i] - 128
+              sum += amplitude * amplitude
+            }
+            const rms = Math.sqrt(sum / dataArray.length)
+
+            if (rms > BARGE_IN_RMS_THRESHOLD) {
+              sustained++
+              if (sustained >= SUSTAIN_CHECKS) {
+                // Confirmed barge-in — clean up first, then fire callback.
+                // The setTimeout(0) yields to the event loop so the mic stream
+                // is fully stopped before FormSession tries to open a new one.
+                // Without this, iOS throws NotReadableError on the next getUserMedia.
+                doCleanup()
+                setTimeout(() => {
+                  if (onBargeInRef.current) onBargeInRef.current()
+                }, 0)
+              }
+            } else {
+              sustained = 0
+            }
+          }, CHECK_INTERVAL_MS)
+
+        } catch (err) {
+          // Barge-in is a progressive enhancement — form works fine without it
+          console.warn('[Barge-in] Could not open ambient stream:', err)
         }
-      } catch (err) {
-        // Silently fail — barge-in is a progressive enhancement
-        // The form still works without it
-        console.warn('[Barge-in] Could not open ambient mic stream:', err)
-      }
-    })()
+      })()
 
     return () => {
       active = false
-      if (cleanupRef.current) cleanupRef.current()
+      cleanupRef.current?.()
       cleanupRef.current = null
     }
   }, [enabled])

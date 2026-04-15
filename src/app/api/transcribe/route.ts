@@ -11,28 +11,51 @@ const ratelimit = redis ? new Ratelimit({
   limiter: Ratelimit.slidingWindow(50, "1 h"),
 }) : null
 
+// Maps MIME types to Google STT encoding strings.
+// Google STT v1p1beta1 requires an explicit encoding field — it can't
+// always sniff the container format from the raw audio bytes alone.
+function getMimeEncoding(mimeType: string): string {
+  if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')) {
+    return 'MP3' // Google STT treats AAC-in-MP4 as MP3 for recognition purposes
+  }
+  if (mimeType.includes('ogg')) {
+    return 'OGG_OPUS'
+  }
+  // Default: webm/opus — most Chrome/Firefox/Android recordings
+  return 'WEBM_OPUS'
+}
+
 export async function POST(req: Request) {
   try {
     const formData = await req.formData()
     const file = formData.get('audio') as Blob
     const formId = formData.get('formId') as string | null
+    // mimeType is sent by useVoiceRecorder so we know exactly what the browser recorded
+    const clientMimeType = (formData.get('mimeType') as string | null) ?? ''
 
     if (!file) {
       return NextResponse.json({ error: 'Missing audio' }, { status: 400 })
     }
 
     if (ratelimit) {
-      const ip = req.headers.get('x-forwarded-for') ?? '127.0.0.1'
+      const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '127.0.0.1'
       const { success } = await ratelimit.limit(`transcribe_${ip}_${formId ?? 'admin'}`)
       if (!success) {
-        return NextResponse.json({ error: "You're going too fast — please wait a moment before continuing." }, { status: 429 })
+        return NextResponse.json(
+          { error: "You're going a bit fast — please wait a moment before continuing." },
+          { status: 429 },
+        )
       }
     }
 
     let keys: { groq_key?: string | null; google_tts_key?: string } | null = null
 
     if (formId) {
-      const { data: form } = await supabaseAdmin.from('forms').select('user_id').eq('id', formId).single()
+      const { data: form } = await supabaseAdmin
+        .from('forms')
+        .select('user_id')
+        .eq('id', formId)
+        .single()
       if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
       const { data } = await supabaseAdmin
         .from('user_keys')
@@ -56,19 +79,28 @@ export async function POST(req: Request) {
     const hasGroq = !!keys?.groq_key
 
     if (!hasGoogleSTT && !hasGroq) {
-      return NextResponse.json({ error: 'No transcription keys configured. Add a Groq key or Google Cloud keys in Settings.' }, { status: 400 })
+      return NextResponse.json(
+        { error: 'No transcription keys configured. Add a Groq or Google Cloud key in Settings.' },
+        { status: 400 },
+      )
     }
 
-    // PREMIUM PATH: Google Cloud STT
+    // --- GOOGLE CLOUD STT PATH ---
     if (hasGoogleSTT) {
       try {
         const arrayBuffer = await file.arrayBuffer()
         const audioBase64 = Buffer.from(arrayBuffer).toString('base64')
+        const encoding = getMimeEncoding(clientMimeType || (file as File).type || '')
 
-        // FIXED: Use v1p1beta1 endpoint which supports:
-        //   - model: 'chirp_2' (previously you were hitting v1 which ignores the model field)
-        //   - enableAutomaticPunctuation (critical for Gemini downstream parsing)
-        //   - alternativeLanguageCodes for Hinglish
+        // v1p1beta1 supports:
+        // - enableAutomaticPunctuation (critical for Gemini downstream parsing)
+        // - alternativeLanguageCodes for Hinglish code-switching
+        // - enableWordConfidence for downstream low-confidence detection
+        // Note: We do NOT pass model: "chirp_2" here because Chirp 2 requires
+        // a service account (OAuth2), not an API key. With API key auth, the
+        // model field is silently ignored and falls back to "latest_long" anyway,
+        // so omitting it avoids a misleading config. Chirp 2 upgrade path:
+        // switch to service account auth + model: "chirp_2" when ready.
         const sttUrl = `https://speech.googleapis.com/v1p1beta1/speech:recognize?key=${keys!.google_tts_key}`
 
         const googleRes = await fetch(sttUrl, {
@@ -76,69 +108,73 @@ export async function POST(req: Request) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             config: {
-              // This is the line that was missing. Without it, you were using
-              // the default "latest_long" model, not Chirp 2.
+              encoding,
               languageCode: 'en-IN',
-              // Hinglish support — Chirp 2 handles code-switching natively
               alternativeLanguageCodes: ['hi-IN'],
-              // Punctuation gives Gemini sentence structure to parse.
-              // Without it, transcripts are one long run-on string.
               enableAutomaticPunctuation: true,
-              // Word confidence lets you detect garbled/low-confidence words
-              // and optionally ask the user to repeat — useful for emails/numbers.
               enableWordConfidence: true,
+              // useEnhanced: true uses the enhanced model (better accuracy for
+              // conversational speech) — available on v1p1beta1 at no extra cost
+              // for supported languages.
+              useEnhanced: true,
             },
-            audio: { content: audioBase64 }
+            audio: { content: audioBase64 },
           }),
         })
 
         const googleJson = await googleRes.json()
 
         if (!googleRes.ok) {
-          console.error('Google STT V1p1beta1 error:', googleJson)
-          if (!hasGroq) throw new Error(googleJson.error?.message || 'Transcription failed at Google Cloud')
-          console.warn('Falling back to Groq after Google STT failure...')
+          console.error('Google STT error:', googleJson)
+          if (!hasGroq) throw new Error(googleJson.error?.message || 'Google STT failed')
+          console.warn('[STT] Google failed, falling back to Groq...')
         } else {
           const result = googleJson.results?.[0]?.alternatives?.[0]
-          const transcript = result?.transcript || ''
-
-          // Optional: pass confidence downstream so FormSession can
-          // show a "did you say X?" UI for low-confidence answers
+          const transcript = result?.transcript ?? ''
           const confidence = result?.confidence ?? 1.0
-
           return NextResponse.json({ transcript, confidence })
         }
       } catch (googleErr: any) {
         if (!hasGroq) throw googleErr
-        console.warn('Google STT exception, falling back to Groq:', googleErr.message)
+        console.warn('[STT] Google exception, falling back to Groq:', googleErr.message)
       }
     }
 
-    // FALLBACK PATH: Groq Whisper
+    // --- GROQ WHISPER FALLBACK PATH ---
     const groqData = new FormData()
-    groqData.append('file', file, 'audio.webm')
+
+    // Determine filename extension — Groq requires a filename to sniff format
+    const ext = clientMimeType.includes('mp4') ? 'mp4'
+      : clientMimeType.includes('ogg') ? 'ogg'
+        : 'webm'
+    groqData.append('file', file, `audio.${ext}`)
     groqData.append('model', 'whisper-large-v3-turbo')
-    groqData.append('response_format', 'verbose_json') // verbose gives us word timestamps + confidence
+    groqData.append('response_format', 'verbose_json')
     groqData.append('language', 'en')
-    // This prompt conditions Whisper on Indian English patterns and
-    // prevents the hallucination of random English phrases on silence.
-    groqData.append('prompt', 'Transcribe this form response. The speaker uses Indian English or Hinglish. Common words: okay, yes, no, actually, basically, na, yaar.')
+    // Priming prompt conditions Whisper on Indian English and prevents
+    // silence hallucination (Whisper sometimes invents phrases on silence/noise)
+    groqData.append(
+      'prompt',
+      'Transcribe this form response. Speaker uses Indian English or Hinglish. Common words: okay, yes, no, actually, basically, na, yaar, theek hai.',
+    )
 
     const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
-      headers: { 'Authorization': `Bearer ${keys!.groq_key}` },
+      headers: { Authorization: `Bearer ${keys!.groq_key}` },
       body: groqData as unknown as BodyInit,
     })
 
     const groqJson = await groqRes.json()
+    if (!groqRes.ok) throw new Error(groqJson.error?.message || 'Groq transcription failed')
 
-    if (!groqRes.ok) throw new Error(groqJson.error?.message || 'Transcription failed at Groq')
+    // Convert log-prob to 0-1 confidence score
+    const groqConfidence = groqJson.segments?.[0]?.avg_logprob
+      ? Math.exp(groqJson.segments[0].avg_logprob)
+      : 0.9
 
     return NextResponse.json({
-      transcript: groqJson.text || '',
-      confidence: groqJson.segments?.[0]?.avg_logprob
-        ? Math.exp(groqJson.segments[0].avg_logprob) // convert log-prob to 0-1 confidence
-        : 0.9
+      transcript: groqJson.text ?? '',
+      confidence: groqConfidence,
     })
 
   } catch (err: any) {
