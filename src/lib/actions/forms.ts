@@ -40,3 +40,56 @@ export async function saveForm(title: string, description: string, fields: Field
 
   return form.id
 }
+
+import { revalidatePath } from 'next/cache'
+
+export async function toggleFormStatus(formId: string, isActive: boolean) {
+  try {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+
+    if (!user) throw new Error('Unauthorized')
+
+    // Verify ownership
+    const { data: form } = await supabase.from('forms').select('user_id').eq('id', formId).single()
+    if (form?.user_id !== user.id) throw new Error('Unauthorized')
+
+    const { error } = await supabase
+      .from('forms')
+      .update({ is_active: isActive })
+      .eq('id', formId)
+
+    if (error) throw new Error(error.message)
+
+    revalidatePath(`/admin/forms/${formId}`)
+    revalidatePath('/admin')
+    return { success: true }
+  } catch (error: any) {
+    return { error: error.message }
+  }
+}
+
+export async function deleteForm(formId: string) {
+  try {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+
+    if (!user) throw new Error('Unauthorized')
+
+    // Verify ownership
+    const { data: form } = await supabase.from('forms').select('user_id').eq('id', formId).single()
+    if (form?.user_id !== user.id) throw new Error('Unauthorized')
+
+    const { error } = await supabase
+      .from('forms')
+      .delete()
+      .eq('id', formId)
+
+    if (error) throw new Error(error.message)
+
+    revalidatePath('/admin')
+    return { success: true }
+  } catch (error: any) {
+    return { error: error.message }
+  }
+}

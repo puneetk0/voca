@@ -48,10 +48,12 @@ export default function FormSession({
   form,
   fields,
   prefills = {},
+  userEmail,
 }: {
   form: any
   fields: any[]
   prefills?: Record<string, string>
+  userEmail?: string
 }) {
   const store = useConversationStore()
   const [inputText, setInputText] = useState('')
@@ -187,6 +189,7 @@ export default function FormSession({
       currentFieldIndex: fieldIndex,
       history: store.history,
       userMessage,
+      userEmail,
       ...(extraContext ? { extraContext } : {}),
     })
 
@@ -202,6 +205,7 @@ export default function FormSession({
         currentFieldIndex: fieldIndex,
         history: store.history,
         userMessage,
+        userEmail,
       })
 
       if (retry.data) {

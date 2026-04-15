@@ -3,6 +3,7 @@ import Link from 'next/link'
 import { redirect } from 'next/navigation'
 import { CopyLinkButton } from '@/components/admin/CopyLinkButton'
 import { ExportCSVButton } from '@/components/admin/ExportCSVButton'
+import { FormActions } from '@/components/admin/FormActions'
 import ResponsesTable from '@/components/admin/ResponsesTable'
 import { ArrowLeft } from 'lucide-react'
 
@@ -55,13 +56,16 @@ export default async function FormDashboard({ params }: { params: Promise<{ id: 
         </div>
         
         <div className="flex flex-col items-start md:items-end gap-3">
-          <span className="text-xs font-medium uppercase tracking-wider text-foreground/40 pl-2">Share Link</span>
-          <CopyLinkButton formId={form.id} />
-          <ExportCSVButton 
-            formId={form.id} 
-            formTitle={form.title}
-            disabled={!responses || responses.length === 0} 
-          />
+          <span className="text-xs font-medium uppercase tracking-wider text-foreground/40 pl-2">Actions</span>
+          <div className="flex items-center gap-2">
+            <CopyLinkButton formId={form.id} />
+            <ExportCSVButton 
+              formId={form.id} 
+              formTitle={form.title}
+              disabled={!responses || responses.length === 0} 
+            />
+          </div>
+          <FormActions formId={form.id} isActive={form.is_active} />
         </div>
       </div>
       <div className="space-y-6">

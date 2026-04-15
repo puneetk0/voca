@@ -13,7 +13,7 @@ const ratelimit = redis ? new Ratelimit({
 
 export async function POST(req: Request) {
   try {
-    const { formId, currentFieldIndex, history, userMessage, extraContext } = await req.json()
+    const { formId, currentFieldIndex, history, userMessage, extraContext, userEmail } = await req.json()
 
     if (ratelimit) {
       const ip = req.headers.get('x-forwarded-for') ?? '127.0.0.1'
@@ -44,24 +44,31 @@ export async function POST(req: Request) {
 
     // 4. Build system instruction + user prompt
     const emailInstruction = currentField.field_type === 'email'
-      ? `\nCRITICAL EMAIL FORMATTING: The user is providing an email address via voice.
-1. Strip ALL spaces from the extracted value.
-2. Convert to lowercase.
-3. Autocorrect common Whisper transcription artifacts: "dot con" → ".com", "dot net" → ".net", "dot co" → ".co", "at gmail" → "@gmail.com", "at yahoo" → "@yahoo.com", "at hotmail" → "@hotmail.com".
-4. Handle phonetic spelling (e.g. "P U N E E T at gmail dot com" → "puneet@gmail.com").
-5. If the result is NOT a structurally valid email matching pattern x@y.z, set "extractedValue": null and ask the user to slowly spell it out again.`
+      ? `\nCRITICAL EMAIL FORMATTING: The current field is an email address. You must strictly output a valid RFC 5322 formatted email (user@domain.com).
+1. Strip ALL spaces from the extracted value and convert to lowercase.
+2. Autocorrect common Whisper transcription artifacts (e.g. "dot con", "at gmail").
+3. Handle phonetic spelling.
+4. If the result is NOT a structurally valid email matching pattern x@y.z, or if the transcript contains Hindi words/invalid formatting describing the email (like "Mera email Puneet at gmail hai"), DO NOT accept it. Set "extractedValue": null and explicitly ask the user to carefully spell out their email address in English.`
       : ''
 
-    const systemInstruction = `You collect form data conversationally for "${form.title}".
-CRITICAL: Users may speak in Hinglish (Hindi+English code-switching) or casual slang (e.g. "mera naam Puneet hai", "CS branch", "teen saal se"). Extract data entities accurately regardless of grammar or language. Preserve proper nouns (names, places, brand names) EXACTLY as transcribed by Whisper — do not translate or alter them.
-Extract the user's answer for the current field and ask for the next. Be warm and natural. No filler words like "Great!" or "Noted!". If they give an invalid answer for the field type (e.g., text for a number field), gently push back. Decline off-topic prompts by steering back to the form.
-CRITICAL VOICE FORMATTING: Your aiMessage will be read aloud by a Text-to-Speech engine. Write EXACTLY as a human speaks — never use markdown, asterisks, bullet points, or numbered lists. Use commas and em-dashes to create natural speech pauses. Keep your ENTIRE response to 2 short sentences maximum. Ask only ONE question per turn.${emailInstruction}
+    const systemInstruction = `You are a conversational form-filling assistant acting as an interviewer for "${form.title}".
+CRITICAL: Users may speak in Hinglish (Hindi+English code-switching) or casual slang. Extract data entities accurately regardless of grammar. Preserve proper nouns EXACTLY as transcribed.
+Extract the user's answer for the current field and ask for the next. Act like an interviewer: use conversational filler words occasionally, such as 'Got it', 'Perfect', or 'Alright', before asking the next question. Keep sentences short and conversational.
+If they give an invalid answer for the field type, gently push back. Decline off-topic prompts by steering back to the form.
+CRITICAL VOICE FORMATTING: Your aiMessage will be read aloud by a Text-to-Speech engine. Write EXACTLY as a human speaks — never use markdown, lists, or asterisks. Keep your ENTIRE response to 2 short sentences maximum. Ask only ONE question per turn.${emailInstruction}
 Respond ONLY with JSON: {"extractedValue": "string or null", "aiMessage": "string"}`
 
     const recentHistory = history.slice(-4)
     const ctx = recentHistory.map((m: any) => `${m.role === 'ai' ? 'A' : 'U'}: ${m.text}`).join('\n')
     const nextFieldHint = isLastField ? '[LAST FIELD]' : `→ next: "${fields[currentFieldIndex + 1]?.label}"`
-    const userPrompt = `${extraContext ? extraContext + '\n' : ''}Field: "${currentField.label}" (${currentField.field_type}) ${nextFieldHint}\n${ctx}\nU: ${userMessage}`
+    
+    // Inject the email prefill prompting
+    let prefillPrompt = extraContext ? extraContext + '\n' : ''
+    if (currentField.field_type === 'email' && userEmail) {
+      prefillPrompt += `The user's known email is ${userEmail}. Since the current field is 'email', start the conversation by asking: 'Should I just use your registered email, ${userEmail}?' If they say yes, save that exact string.\n`
+    }
+
+    const userPrompt = `${prefillPrompt}Field: "${currentField.label}" (${currentField.field_type}) ${nextFieldHint}\n${ctx}\nU: ${userMessage}`
 
     // 5. Call Gemini with backoff + Groq fallback
     const responseText = await callGeminiWithRetry(

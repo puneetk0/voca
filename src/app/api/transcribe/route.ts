@@ -77,8 +77,8 @@ export async function POST(req: Request) {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             config: {
-              languageCode: 'en-IN',
-              alternativeLanguageCodes: ['hi-IN'], // Handles Hinglish flawlessly
+              languageCode: 'en-IN'
+              // alternativeLanguageCodes: ['hi-IN'], // Handles Hinglish flawlessly
             },
             audio: {
               content: audioBase64,
