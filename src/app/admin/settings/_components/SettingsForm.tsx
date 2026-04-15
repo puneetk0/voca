@@ -7,10 +7,11 @@ import { CheckCircle2, XCircle, Loader2 } from 'lucide-react'
 
 type KeyStatus = 'idle' | 'checking' | 'valid' | 'invalid'
 
-export default function SettingsForm({ initialGemini, initialGroq, initialGoogleTTS }: { initialGemini: string; initialGroq: string; initialGoogleTTS?: string }) {
+export default function SettingsForm({ initialGemini, initialGroq, initialGoogleTTS, initialGcpProjectId }: { initialGemini: string; initialGroq: string; initialGoogleTTS?: string; initialGcpProjectId?: string }) {
   const [geminiKey, setGeminiKey] = useState(initialGemini)
   const [groqKey, setGroqKey] = useState(initialGroq)
   const [googleTTSKey, setGoogleTTSKey] = useState(initialGoogleTTS || '')
+  const [gcpProjectId, setGcpProjectId] = useState(initialGcpProjectId || '')
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState('')
   const [geminiStatus, setGeminiStatus] = useState<KeyStatus>('idle')
@@ -46,6 +47,15 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
     if (validation.groqError) setGroqError(validation.groqError)
     if (validation.googleTTSError) setGoogleTTSError(validation.googleTTSError)
 
+    // Pair validation: both TTS key and Project ID must be set together, or neither
+    const hasGCPKey = !!googleTTSKey
+    const hasGCPProject = !!gcpProjectId
+    if (hasGCPKey !== hasGCPProject) {
+      setStatus('error')
+      setErrorMessage('Google Cloud API Key and Project ID must both be set together.')
+      return
+    }
+
     if (!validation.gemini || !validation.groq || (googleTTSKey && !validation.googleTTS)) {
       setStatus('error')
       setErrorMessage('One or more keys failed validation. Please fix them before saving.')
@@ -53,7 +63,7 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
     }
 
     // Step 2: Save to DB
-    const result = await saveUserKeys(geminiKey, groqKey, googleTTSKey)
+    const result = await saveUserKeys(geminiKey, groqKey, googleTTSKey, gcpProjectId)
     if (result?.error) {
       setStatus('error')
       setErrorMessage(result.error)
@@ -111,20 +121,41 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
             className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
           />
         </div>
-        {/* Google TTS Key */}
-        <div className="pt-4 border-t border-foreground/10">
-          <div className="flex items-center justify-between mb-2">
-            <label htmlFor="google_tts_key" className="block text-sm font-medium">Google Cloud TTS API Key <span className="opacity-50 font-normal">(Optional)</span></label>
-            <KeyIndicator status={googleTTSStatus} error={googleTTSError} />
+        {/* Google Cloud Section */}
+        <div className="pt-4 border-t border-foreground/10 space-y-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-foreground/40">Google Cloud (Optional — Premium Voice &amp; Transcription)</p>
+
+          {/* Google TTS / STT API Key */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label htmlFor="google_tts_key" className="block text-sm font-medium">GCP API Key</label>
+              <KeyIndicator status={googleTTSStatus} error={googleTTSError} />
+            </div>
+            <input
+              id="google_tts_key"
+              type="password"
+              value={googleTTSKey}
+              onChange={(e) => { setGoogleTTSKey(e.target.value); setGoogleTTSStatus('idle') }}
+              placeholder="AIzaSy..."
+              className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
+            />
           </div>
-          <input
-            id="google_tts_key"
-            type="password"
-            value={googleTTSKey}
-            onChange={(e) => { setGoogleTTSKey(e.target.value); setGoogleTTSStatus('idle') }}
-            placeholder="AIzaSy... (Premium Voice)"
-            className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
-          />
+
+          {/* GCP Project ID */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label htmlFor="gcp_project_id" className="block text-sm font-medium">GCP Project ID</label>
+            </div>
+            <input
+              id="gcp_project_id"
+              type="text"
+              value={gcpProjectId}
+              onChange={(e) => setGcpProjectId(e.target.value)}
+              placeholder="voca-forms-123456"
+              className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm font-mono text-sm"
+            />
+            <p className="mt-1.5 text-xs text-foreground/40">Found in the GCP Console top-left dropdown. Required alongside the API key.</p>
+          </div>
         </div>
       </div>
 

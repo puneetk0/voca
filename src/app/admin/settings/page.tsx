@@ -12,7 +12,7 @@ export default async function SettingsPage() {
 
   const { data: keys } = await supabase
     .from('user_keys')
-    .select('gemini_key, groq_key, google_tts_key')
+    .select('gemini_key, groq_key, google_tts_key, gcp_project_id')
     .eq('user_id', user.id)
     .single()
 
@@ -28,7 +28,8 @@ export default async function SettingsPage() {
       <SettingsForm 
         initialGemini={keys?.gemini_key || ''} 
         initialGroq={keys?.groq_key || ''} 
-        initialGoogleTTS={keys?.google_tts_key || ''} 
+        initialGoogleTTS={keys?.google_tts_key || ''}
+        initialGcpProjectId={keys?.gcp_project_id || ''}
       />
     </main>
   )

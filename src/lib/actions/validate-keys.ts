@@ -42,18 +42,19 @@ export async function validateAPIKeys(geminiKey: string, groqKey: string, google
     result.gemini = true
   } catch (e: any) {
     result.gemini = false
+
+    // 🛑 TEMPORARY DEBUG: Print the exact error to your server terminal
+    console.log("🔴 RAW GOOGLE ERROR:", e.message);
+
     if (e.message?.includes('timeout')) {
       result.geminiError = e.message
-    } else if (e.message?.includes('403') || e.message?.includes('401') || e.message?.includes('API key')) {
-      result.geminiError = 'Invalid or unauthorised Gemini API key.'
     } else if (e.message?.includes('429')) {
-      // Key is valid but quota is exhausted — still accept it
       result.gemini = true
     } else {
-      result.geminiError = `Gemini error: ${e.message}`
+      // 🛑 TEMPORARY DEBUG: Send the exact error to the frontend
+      result.geminiError = `Raw Error: ${e.message}`
     }
   }
-
   // --- Groq check ---
   try {
     const ac = new AbortController()

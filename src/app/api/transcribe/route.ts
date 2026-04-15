@@ -29,50 +29,104 @@ export async function POST(req: Request) {
       }
     }
 
-    let groqKey: string | null = null
+    // 1. Resolve user keys
+    let keys: { groq_key?: string | null; google_tts_key?: string | null; gcp_project_id?: string | null } | null = null
 
     if (formId) {
-      // Responder path: look up key via form owner
+      // Responder path: look up keys via form owner
       const { data: form } = await supabaseAdmin.from('forms').select('user_id').eq('id', formId).single()
       if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
-      const { data: keys } = await supabaseAdmin.from('user_keys').select('groq_key').eq('user_id', form.user_id).single()
-      groqKey = keys?.groq_key ?? null
+      const { data } = await supabaseAdmin
+        .from('user_keys')
+        .select('groq_key, google_tts_key, gcp_project_id')
+        .eq('user_id', form.user_id)
+        .single()
+      keys = data
     } else {
-      // Admin path: look up key via authenticated session
+      // Admin path: look up keys via authenticated session
       const supabase = await createClient()
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-      const { data: keys } = await supabaseAdmin.from('user_keys').select('groq_key').eq('user_id', user.id).single()
-      groqKey = keys?.groq_key ?? null
+      const { data } = await supabaseAdmin
+        .from('user_keys')
+        .select('groq_key, google_tts_key, gcp_project_id')
+        .eq('user_id', user.id)
+        .single()
+      keys = data
     }
 
-    if (!groqKey) {
-      return NextResponse.json({ error: 'No Groq API Key configured. Add it in Settings.' }, { status: 400 })
+    // Notice we only strictly require the google_tts_key now, as V1 doesn't need the project ID in the URL
+    const hasGoogleSTT = !!keys?.google_tts_key
+    const hasGroq = !!keys?.groq_key
+
+    if (!hasGoogleSTT && !hasGroq) {
+      return NextResponse.json({ error: 'No transcription keys configured. Add a Groq key or Google Cloud keys in Settings.' }, { status: 400 })
     }
 
-    // 3. Prepare payload for Groq Whisper
+    // 2a. PREMIUM PATH: Google Cloud STT V1 (API Key native)
+    if (hasGoogleSTT) {
+      try {
+        const arrayBuffer = await file.arrayBuffer()
+        const audioBase64 = Buffer.from(arrayBuffer).toString('base64')
+
+        // Using V1 endpoint which accepts standard API keys
+        const sttUrl = `https://speech.googleapis.com/v1/speech:recognize?key=${keys!.google_tts_key}`
+
+        const googleRes = await fetch(sttUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            config: {
+              languageCode: 'en-IN',
+              alternativeLanguageCodes: ['hi-IN'], // Handles Hinglish flawlessly
+            },
+            audio: {
+              content: audioBase64,
+            }
+          }),
+        })
+
+        const googleJson = await googleRes.json()
+
+        if (!googleRes.ok) {
+          console.error('Google STT V1 error:', googleJson)
+          // Non-fatal: fall through to Groq if available
+          if (!hasGroq) {
+            throw new Error(googleJson.error?.message || 'Transcription failed at Google Cloud')
+          }
+          console.warn('Falling back to Groq after Google STT failure...')
+        } else {
+          const transcript = googleJson.results?.[0]?.alternatives?.[0]?.transcript || ''
+          return NextResponse.json({ transcript })
+        }
+      } catch (googleErr: any) {
+        if (!hasGroq) throw googleErr
+        console.warn('Google STT exception, falling back to Groq:', googleErr.message)
+      }
+    }
+
+    // 2b. FALLBACK PATH: Groq Whisper
     const groqData = new FormData()
-    // Append standard generic name which Groq parses properly based on blob mime
-    groqData.append('file', file, 'audio.mp4') 
+    groqData.append('file', file, 'audio.mp4')
     groqData.append('model', 'whisper-large-v3-turbo')
     groqData.append('response_format', 'json')
+    // Secret sauce to prevent Whisper hallucinations on Indian accents:
+    groqData.append('prompt', 'This is a form response in Indian English or Hinglish.')
 
-    // 4. Send to Groq
     const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${groqKey}`
-      },
-      body: groqData as unknown as BodyInit
+      headers: { 'Authorization': `Bearer ${keys!.groq_key}` },
+      body: groqData as unknown as BodyInit,
     })
 
     const groqJson = await groqRes.json()
-    
+
     if (!groqRes.ok) {
       throw new Error(groqJson.error?.message || 'Transcription failed at Groq')
     }
 
-    return NextResponse.json({ transcript: groqJson.text })
+    return NextResponse.json({ transcript: groqJson.text || '' })
+
   } catch (err: any) {
     console.error('Transcription error:', err)
     return NextResponse.json({ error: err.message }, { status: 500 })
