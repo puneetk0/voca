@@ -10,7 +10,7 @@ const ratelimit = redis ? new Ratelimit({
   redis,
   // Rate limit keyed on IP only — NOT formId, which is user-supplied and
   // could be spoofed to get a fresh window per request.
-  limiter: Ratelimit.slidingWindow(50, "1 h"),
+  limiter: Ratelimit.slidingWindow(500, "1 h"),
 }) : null
 
 // Per-field-type validation rules injected into the system prompt.
@@ -187,7 +187,7 @@ export async function POST(req: Request) {
     // not just "Got it. What's your [label]?"
     const nextFieldContext = nextField
       ? `After extracting the current answer, transition naturally into asking about: "${nextField.label}" (${nextField.field_type}). Reference their previous answer if it makes the transition feel connected.`
-      : `This is the LAST field. After extracting the answer, close warmly and briefly — one sentence, like "That's everything, thanks so much!" or "All done, appreciate it!" Keep it genuine, not scripted.`
+      : `This is the LAST field. After extracting the answer, close warmly and briefly — one sentence, like "That's everything, thankyou so much!" or "All done, appreciate it!" Keep it genuine, not scripted.`
 
     const userPrompt = [
       extraContext ?? '',

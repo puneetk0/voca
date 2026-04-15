@@ -7,8 +7,10 @@ const url = process.env.UPSTASH_REDIS_REST_URL
 const redis = url && url.startsWith('http') ? Redis.fromEnv() : null
 const ratelimit = redis ? new Ratelimit({
   redis,
-  limiter: Ratelimit.slidingWindow(50, "1 h"),
+  limiter: Ratelimit.slidingWindow(500, "1 h"),
 }) : null
+
+
 
 // Converts plain AI text into SSML with natural pacing.
 // Hard cap is enforced by slicing at a sentence boundary, not a raw character
@@ -37,24 +39,9 @@ function buildSSML(text: string): string {
     }
   }
 
-  // Natural pause after sentence-ending punctuation
-  t = t.replace(/\. /g, '.<break time="300ms"/> ')
-  t = t.replace(/\? /g, '?<break time="280ms"/> ')
-  t = t.replace(/! /g, '!<break time="280ms"/> ')
-
-  // Comma pauses — conversational rhythm
-  t = t.replace(/, /g, ',<break time="120ms"/> ')
-
-  // Ellipsis — thoughtful pause
-  t = t.replace(/\.\.\./g, '<break time="450ms"/>')
-
-  // Soft prosody on common acknowledgement words so they don't sound clipped
-  // These are the ones that survived the prompt rewrite — keep list short.
-  const softFillers = ['Okay', 'Alright', 'Sure', 'Right', 'Noted', 'Yep']
-  for (const filler of softFillers) {
-    const regex = new RegExp(`\\b(${filler}[.,!]?)`, 'gi')
-    t = t.replace(regex, `<prosody rate="92%" volume="-1dB">$1</prosody>`)
-  }
+  // HD voices like Chirp3 handle their own expressiveness and prosody.
+  // Explicit <break> and <prosody> tags confuse their intonation model,
+  // causing robotic, disconnected jumps on words like "Okay" or "Got it."
 
   return `<speak>${t}</speak>`
 }
@@ -102,22 +89,23 @@ export async function POST(req: Request) {
         body: JSON.stringify({
           input: { ssml: ssmlPayload },
           voice: {
-            languageCode: 'en-IN',
+            languageCode: 'hi-IN',
             // Neural2-C: warm, conversational Indian English male voice.
             // Journey voices are better but require v1beta1 endpoint.
             // If you upgrade to v1beta1 later, switch to en-IN-Journey-D (male)
             // or en-IN-Journey-F (female) for noticeably more natural output.
-            name: 'en-IN-Neural2-C',
+            // My choices - Algenib, Charon,Orus
+            name: 'hi-IN-Chirp3-HD-Charon',
           },
           audioConfig: {
             audioEncoding: 'MP3',
             // 1.1 is slightly faster than natural but not rushed.
             // Neural2 voices at default 1.0 can sound slightly slow for
             // conversational back-and-forth; 1.1 feels more natural for chat.
-            speakingRate: 1.1,
+            speakingRate: 0.95,
             // Slight downward pitch — Neural2-C's default pitch is slightly
             // high; -1.0 brings it closer to natural male register.
-            pitch: -1.0,
+            pitch: 0.0,
             volumeGainDb: 1.5,
           },
         }),
