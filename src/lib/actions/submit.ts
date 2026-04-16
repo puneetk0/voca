@@ -28,12 +28,23 @@ export async function submitResponse(formData: FormData) {
     }
   }
 
-  // 2. Insert Answers (with optional audio URLs)
-  const answersToInsert = await Promise.all(
+  // 2. Fetch valid field IDs for this form to prevent FK violations
+  const { data: validFields } = await supabase
+    .from('fields')
+    .select('id')
+    .eq('form_id', formId)
+  
+  const validFieldIds = new Set(validFields?.map(f => f.id) || [])
+
+  // 3. Insert Answers (with optional audio URLs)
+  const answersToInsert = (await Promise.all(
     Object.entries(answers).map(async ([field_id, value]) => {
+      // Skip if Field ID doesn't exist for this form (prevents hallucination errors)
+      if (!validFieldIds.has(field_id)) return null
+
       let audio_url: string | null = null
 
-      // 2a. Try to upload audio if we have a blob for this field
+      // 3a. Try to upload audio if we have a blob for this field
       if (audioBlobs[field_id]) {
         try {
           const blob = audioBlobs[field_id]
@@ -50,27 +61,26 @@ export async function submitResponse(formData: FormData) {
               .from('audio_submissions')
               .getPublicUrl(fileName)
             audio_url = urlData.publicUrl
-          } else {
-            console.error(`Audio upload failed for field ${field_id}:`, uploadErr.message)
-            // Non-fatal — text answer still saves
           }
         } catch (audioErr) {
           console.error(`Audio processing error for field ${field_id}:`, audioErr)
-          // Non-fatal — text answer still saves
         }
       }
 
       const sentiment = sentiments[field_id] || null
       return { response_id: response.id, field_id, value: value as string, audio_url, sentiment }
     })
-  )
+  )).filter(Boolean) as any[]
 
   if (answersToInsert.length > 0) {
     const { error: answersErr } = await supabase.from('answers').insert(answersToInsert)
-    if (answersErr) console.error('Error inserting answers:', answersErr)
+    if (answersErr) {
+       console.error('Error inserting answers:', answersErr)
+       throw new Error(`Failed to save answers: ${answersErr.message}`)
+    }
   }
 
-  // 3. Insert Transcript
+  // 4. Insert Transcript
   const { error: transcriptErr } = await supabase.from('transcripts').insert({
     response_id: response.id,
     messages: history

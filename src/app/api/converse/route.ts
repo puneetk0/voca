@@ -58,6 +58,11 @@ FIELD TYPE: File Upload (Document, Resume, Image, etc.)
 - Explicitly instruct them to tap the upload zone on their screen.
 - If they just uploaded a file (you'll see a [System: User uploaded file: URL] message), set the extractedValue to that URL.`
 
+    case 'mcq': {
+      // options come from currentField — injected dynamically below
+      return '__MCQ_RULES__'
+    }
+
     default:
       return `FIELD TYPE: Short text — accept the response as-is after cleaning up obvious transcription noise.`
   }
@@ -82,11 +87,27 @@ FIELD TYPE: File Upload (Document, Resume, Image, etc.)
 function buildSystemPrompt(
   formTitle: string,
   fieldType: string,
-  allFields: Array<{ id: string; label: string; field_type: string; logic_rules?: any[] }>,
+  allFields: Array<{ id: string; label: string; field_type: string; options?: string[]; logic_rules?: any[] }>,
   currentFieldLabel: string,
   userEmail?: string,
+  currentFieldOptions?: string[],
 ): string {
-  const fieldRules = getFieldRules(fieldType, userEmail)
+  let fieldRules = getFieldRules(fieldType, userEmail)
+
+  // Inject real MCQ options at runtime
+  if (fieldType === 'mcq' && currentFieldOptions && currentFieldOptions.length > 0) {
+    const optionsList = currentFieldOptions.map(o => `"${o}"`).join(', ')
+    fieldRules = `
+FIELD TYPE: Multiple Choice
+- VALID OPTIONS: [${optionsList}]
+- CRITICAL: You MUST verify the user's response against the VALID OPTIONS list. 
+- If the user provides an answer that is NOT in the list (e.g., they say "four" when the options are "Yes" and "No"), you MUST:
+  1. Set "extractedValues" to {} (empty object).
+  2. In "spokenMessage", gently inform them that you didn't catch a valid choice and repeat the options.
+- If they provide a valid choice (or a very close synonym like "yep" for "Yes"), set the value to the EXACT option string from the list.
+- Never extract a value for an MCQ field that is not one of the predefined options.`
+  }
+
   const fieldList = allFields.map((f, i) => {
     let ruleText = ''
     if (f.logic_rules && f.logic_rules.length > 0) {
@@ -94,6 +115,9 @@ function buildSystemPrompt(
     }
     return `${i}. [ID: ${f.id}] ${f.label} (${f.field_type})${ruleText}`
   }).join('\n')
+
+  // Use the first real field ID as the example in the prompt so Gemini doesn't copy a fake placeholder
+  const exampleId = allFields[0]?.id ?? 'FIELD_UUID'
 
   return `You are having a friendly, flowing conversation to help someone fill out a form called "${formTitle}".
 
@@ -129,16 +153,17 @@ ${fieldRules}
 
 RESPONSE FORMAT: Valid JSON only, nothing else, no markdown fences:
 {
-  "extractedValues": { "field_id_abc123": "extracted value if answered" },
-  "nextFieldIndex": 4,
+  "extractedValues": { "${exampleId}": "the extracted value" },
+  "nextFieldIndex": 1,
   "sentiment": "positive | neutral | hesitant | frustrated",
   "spokenMessage": "your conversational audio script goes here",
   "displayedMessage": "ONLY the core question to display on screen. MUST BE 100% FORMAL ENGLISH, NEVER HINGLISH OR HINDI"
 }
 
 IMPORTANT FOR JSON SCHEMA:
-- "extractedValues": Return a JSON object mapping the field ID to its extracted value. You can extract multiple fields at once if the user answers upcoming questions preemptively! If nothing was valid, leave the object empty or null.
-- "nextFieldIndex": The 0-indexed integer of the NEXT field to ask. Usually this is just current + 1. However, if a condition in the [Branching Rules] of the current or future fields is met, SKIP ahead to the appropriate index!
+- "extractedValues": A JSON object mapping the EXACT field ID (from the FORM OVERVIEW above) to the extracted value. Copy the IDs EXACTLY — do not invent IDs. If nothing valid was extracted, return null or {}.
+- Use the real IDs from the form overview. For example: { "${exampleId}": "extracted value" }.
+- "nextFieldIndex": The 0-indexed integer of the NEXT field to ask. Usually current + 1.
 - "sentiment": Analyze the underlying emotion of the user's latest message. Pick one of the four options.
 `
 }
@@ -202,9 +227,10 @@ export async function POST(req: Request) {
     const systemInstruction = buildSystemPrompt(
       form.title,
       currentField.field_type,
-      fields.map(f => ({ id: f.id, label: f.label, field_type: f.field_type, logic_rules: f.logic_rules })),
+      fields.map(f => ({ id: f.id, label: f.label, field_type: f.field_type, options: f.options, logic_rules: f.logic_rules })),
       currentField.label,
       userEmail,
+      currentField.options ?? undefined,
     )
 
     // Keep last 10 turns (5 exchanges) — bumped from 6 to give Gemini more
@@ -257,12 +283,24 @@ export async function POST(req: Request) {
     }
 
     // Support legacy scalar extraction or new multi-intent map
-    const hasValues = parsed.extractedValues && Object.keys(parsed.extractedValues).length > 0;
-    const extractedObject = hasValues ? parsed.extractedValues : (parsed.extractedValue ? { [currentField.id]: parsed.extractedValue } : null);
+    let sanitizedExtractedValues: Record<string, string> = {}
+    const validFieldIds = new Set(fields.map(f => f.id))
+
+    if (parsed.extractedValues) {
+      Object.entries(parsed.extractedValues).forEach(([id, val]) => {
+        if (validFieldIds.has(id)) {
+          sanitizedExtractedValues[id] = val as string
+        } else {
+          console.warn(`[Converse] AI hallucinated field ID: ${id}. Stripping.`)
+        }
+      })
+    } else if (parsed.extractedValue) {
+      sanitizedExtractedValues[currentField.id] = parsed.extractedValue
+    }
 
     const nextIndex = parsed.nextFieldIndex !== undefined 
       ? parsed.nextFieldIndex 
-      : (extractedObject !== null ? Math.min(currentFieldIndex + 1, fields.length) : currentFieldIndex);
+      : (Object.keys(sanitizedExtractedValues).length > 0 ? Math.min(currentFieldIndex + 1, fields.length) : currentFieldIndex);
       
     // Epic 7: Confidence-based sentiment correction to prevent false positives
     let finalSentiment = parsed.sentiment || 'neutral'
@@ -270,13 +308,15 @@ export async function POST(req: Request) {
       finalSentiment = 'neutral'
     }
 
+    const hasExtracted = Object.keys(sanitizedExtractedValues).length > 0;
+
     return NextResponse.json({
       aiSpokenMessage: parsed.spokenMessage,
       aiMessage: parsed.displayedMessage,
-      extractedValues: extractedObject,
+      extractedValues: sanitizedExtractedValues,
       nextFieldIndex: nextIndex,
       sentiment: finalSentiment,
-      isComplete: isLastField && extractedObject !== null,
+      isComplete: isLastField && (hasExtracted || nextIndex >= fields.length),
     })
 
   } catch (error: any) {

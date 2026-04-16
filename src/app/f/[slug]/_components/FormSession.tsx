@@ -71,6 +71,19 @@ export default function FormSession({
   const isSpeakingRef = useRef(false)
   const isHandlingTranscriptRef = useRef(false)
 
+  // Hard-stop helper — kills TTS + Audio + resets speaking ref
+  // Must be called on the same call stack as the user tap (synchronous) to satisfy
+  // iOS autoplay policy before async work starts.
+  const killAudio = useCallback(() => {
+    isSpeakingRef.current = false
+    window.speechSynthesis.cancel()
+    if (audioRef.current) {
+      audioRef.current.onended = null
+      audioRef.current.pause()
+      audioRef.current.currentTime = 0
+    }
+  }, [])
+
   const playChime = useCallback(() => {
     try {
       const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext
@@ -386,15 +399,17 @@ export default function FormSession({
     if (recorderError) setVoiceState('error')
   }, [isRecording, isProcessing, recorderError])
 
-  // Start sequence based on explicit user gesture (onClick)
+  // After AI speaks and field is 'file', don't start the mic — user must tap upload
+  function shouldAutoListen(fieldIndex: number) {
+    return fields[fieldIndex]?.field_type !== 'file'
+  }
+
   async function handleInitialSequence(mode: 'text' | 'voice') {
     if (mode === 'voice') {
       try {
-        // Step 1: Request mic permission
         const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
         tempStream.getTracks().forEach(t => t.stop())
       } catch (err) {
-        // Mic blocked — fall back to text
         store.setMode('text')
         handleInitialSequence('text')
         return
@@ -411,7 +426,10 @@ export default function FormSession({
 
     await handleConverseResponse('Hello', 0, mode, (aiMessage) => {
       if (mode === 'voice') {
-        playSmartAudio(aiMessage, () => { setVoiceState('idle'); startRecording() })
+        playSmartAudio(aiMessage, () => {
+          setVoiceState('idle')
+          if (shouldAutoListen(store.currentFieldIndex)) startRecording()
+        })
       }
     }, prefillNote)
   }
@@ -645,25 +663,30 @@ export default function FormSession({
               <button
                 key={opt}
                 onClick={async () => {
-                  isSpeakingRef.current = false
-                  window.speechSynthesis.cancel()
-                  if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
+                  // Prevent double-fire if already handling
+                  if (isHandlingTranscriptRef.current) return
+                  isHandlingTranscriptRef.current = true
+
+                  // Synchronously kill all audio before any async work
+                  killAudio()
                   stopRecording()
                   
-                  // Visual feed
                   store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Selected: ${opt}]` })
                   
-                  // Silent override to converse
                   await handleConverseResponse(`[User tapped: ${opt}]`, store.currentFieldIndex, 'voice', (aiMessage, isComplete) => {
                     playSmartAudio(aiMessage, () => {
                       isHandlingTranscriptRef.current = false
                       setVoiceState('idle')
-                      if (!isComplete) startRecording()
-                      else store.setMode('review')
+                      const nextIdx = store.currentFieldIndex
+                      if (!isComplete) {
+                        if (shouldAutoListen(nextIdx)) startRecording()
+                      } else {
+                        store.setMode('review')
+                      }
                     })
                   })
                 }}
-                className="px-6 py-3 rounded-full bg-foreground/[0.04] hover:bg-foreground/[0.08] border border-foreground/10 text-foreground font-medium transition-all text-sm"
+                className="px-6 py-3 rounded-full bg-foreground/[0.04] hover:bg-foreground/[0.08] active:scale-95 border border-foreground/10 text-foreground font-medium transition-all text-sm"
               >
                 {opt}
               </button>
@@ -673,51 +696,83 @@ export default function FormSession({
 
         {fields[store.currentFieldIndex]?.field_type === 'file' && (
           <div className="w-full max-w-xs mx-auto mt-2 mb-4 px-4 relative z-20">
-            <label className={`w-full flex justify-center items-center px-4 py-6 border-2 border-dashed border-foreground/20 rounded-2xl cursor-pointer hover:bg-foreground/[0.04] transition-colors ${isUploading ? 'opacity-50 pointer-events-none' : ''}`}>
-              <span className="text-foreground/50 font-medium text-sm">
-                {isUploading ? 'Uploading...' : 'Tap to upload document'}
+            <label className={`w-full flex flex-col justify-center items-center gap-2 px-4 py-6 border-2 border-dashed rounded-2xl cursor-pointer transition-colors ${
+              isUploading
+                ? 'opacity-50 pointer-events-none border-foreground/20'
+                : 'border-accent-amber/40 hover:bg-accent-amber/5 hover:border-accent-amber/60'
+            }`}>
+              <span className="text-2xl">{isUploading ? '⏳' : '📎'}</span>
+              <span className="text-foreground/60 font-medium text-sm text-center">
+                {isUploading ? 'Uploading...' : 'Tap to upload file'}
               </span>
-              <input type="file" className="hidden" onChange={async (e) => {
-                const file = e.target.files?.[0]
-                if (!file) return
-                
-                setIsUploading(true)
-                isSpeakingRef.current = false
-                window.speechSynthesis.cancel()
-                if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
-                stopRecording()
-                setVoiceState('thinking')
+              <span className="text-foreground/30 text-xs">Max 5 MB</span>
+              <input
+                type="file"
+                accept="image/*,video/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0]
+                  if (!file) return
 
-                const supabase = createClient()
-                const ext = file.name.split('.').pop()
-                const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${ext}`
-                
-                const { error } = await supabase.storage
-                  .from('user_files')
-                  .upload(fileName, file)
-                  
-                setIsUploading(false)
-                
-                if (error) {
+                  // 5 MB guard
+                  if (file.size > 5 * 1024 * 1024) {
+                    store.addMessage({ id: Date.now().toString(), role: 'ai', text: 'File is too large. Please upload something under 5 MB.' })
+                    e.target.value = ''
+                    return
+                  }
+
+                  // Synchronously kill audio + mic
+                  killAudio()
+                  stopRecording()
+                  setIsUploading(true)
+                  setVoiceState('thinking')
+
+                  const supabase = createClient()
+                  const ext = file.name.split('.').pop() || 'bin'
+                  const safeBase = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40)
+                  const fileName = `${Date.now()}-${safeBase}`
+
+                  const { error } = await supabase.storage
+                    .from('user_files')
+                    .upload(fileName, file, { contentType: file.type, upsert: false })
+
+                  setIsUploading(false)
+
+                  if (error) {
                     store.addMessage({ id: Date.now().toString(), role: 'ai', text: `Upload failed: ${error.message}` })
                     setVoiceState('idle')
-                    startRecording()
+                    // Don't restart mic for file fields — user needs to upload
                     return
-                }
+                  }
 
-                const { data: publicData } = supabase.storage.from('user_files').getPublicUrl(fileName)
-                
-                store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Uploaded File: ${file.name}]` })
-                  
-                await handleConverseResponse(`[System: User uploaded file: ${publicData.publicUrl}]`, store.currentFieldIndex, 'voice', (aiMessage, isComplete) => {
-                  playSmartAudio(aiMessage, () => {
-                    isHandlingTranscriptRef.current = false
-                    setVoiceState('idle')
-                    if (!isComplete) startRecording()
-                    else store.setMode('review')
-                  })
-                })
-              }} />
+                  const { data: publicData } = supabase.storage.from('user_files').getPublicUrl(fileName)
+                  const publicUrl = publicData.publicUrl
+
+                  store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Uploaded: ${file.name}]` })
+                  // Store the raw URL directly so review screen can show it
+                  store.setAnswer(fields[store.currentFieldIndex].id, publicUrl)
+
+                  const nextIdx = store.currentFieldIndex
+                  await handleConverseResponse(
+                    `[System: User uploaded file. Name: ${file.name}, URL: ${publicUrl}]`,
+                    nextIdx,
+                    'voice',
+                    (aiMessage, isComplete) => {
+                      playSmartAudio(aiMessage, () => {
+                        isHandlingTranscriptRef.current = false
+                        setVoiceState('idle')
+                        const newIdx = store.currentFieldIndex
+                        if (!isComplete) {
+                          // Only start mic if next field is NOT a file field
+                          if (shouldAutoListen(newIdx)) startRecording()
+                        } else {
+                          store.setMode('review')
+                        }
+                      })
+                    }
+                  )
+                }}
+              />
             </label>
           </div>
         )}
@@ -812,26 +867,69 @@ export default function FormSession({
             <p className="text-foreground/60">We've extracted this from our conversation. Feel free to edit before submitting.</p>
           </header>
           <div className="space-y-6 flex-1 pr-1 pb-10">
-            {fields.map((field) => (
-              <div key={field.id} className="bg-foreground/[0.02] border border-foreground/5 p-5 border-l-4 border-l-accent-sage rounded-r-2xl">
-                <label className="block text-sm font-medium text-foreground/70 mb-2">{field.label}</label>
-                {field.field_type === 'textarea' ? (
-                  <textarea
-                    value={store.answers[field.id] || ''}
-                    onChange={(e) => store.setAnswer(field.id, e.target.value)}
-                    className="w-full bg-transparent border-b border-foreground/10 focus:border-foreground pb-1 focus:outline-none resize-none font-medium"
-                    rows={3}
-                  />
-                ) : (
-                  <input
-                    value={store.answers[field.id] || ''}
-                    onChange={(e) => store.setAnswer(field.id, e.target.value)}
-                    type={field.field_type === 'number' ? 'number' : field.field_type === 'email' ? 'email' : 'text'}
-                    className="w-full bg-transparent border-b border-foreground/10 focus:border-foreground pb-1 focus:outline-none font-medium"
-                  />
-                )}
-              </div>
-            ))}
+            {fields.map((field) => {
+              const val = store.answers[field.id] || ''
+              const isFileField = field.field_type === 'file'
+              const isImageUrl = isFileField && /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(val)
+              const isVideoUrl = isFileField && /\.(mp4|mov|webm|ogg)$/i.test(val)
+
+              return (
+                <div key={field.id} className="bg-foreground/[0.02] border border-foreground/5 p-5 border-l-4 border-l-accent-sage rounded-r-2xl">
+                  <label className="block text-sm font-medium text-foreground/70 mb-2">{field.label}</label>
+                  {isFileField && val ? (
+                    <div className="space-y-2">
+                      {isImageUrl ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img src={val} alt="Uploaded file" className="max-h-40 rounded-xl object-cover border border-foreground/10" />
+                      ) : isVideoUrl ? (
+                        <video src={val} controls className="max-h-40 w-full rounded-xl border border-foreground/10" />
+                      ) : (
+                        <a
+                          href={val}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 text-accent-amber font-medium text-sm hover:opacity-80 transition-opacity"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          View uploaded file
+                        </a>
+                      )}
+                      <p className="text-xs text-foreground/30 truncate">{val}</p>
+                    </div>
+                  ) : field.field_type === 'mcq' && field.options?.length ? (
+                    <div className="flex flex-wrap gap-2">
+                      {field.options.map((opt: string) => (
+                        <button
+                          key={opt}
+                          onClick={() => store.setAnswer(field.id, opt)}
+                          className={`px-4 py-1.5 rounded-full text-sm font-medium border transition-all ${
+                            val === opt
+                              ? 'bg-accent-amber text-black border-accent-amber'
+                              : 'bg-foreground/[0.03] border-foreground/10 hover:border-foreground/20'
+                          }`}
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
+                  ) : field.field_type === 'textarea' ? (
+                    <textarea
+                      value={val}
+                      onChange={(e) => store.setAnswer(field.id, e.target.value)}
+                      className="w-full bg-transparent border-b border-foreground/10 focus:border-foreground pb-1 focus:outline-none resize-none font-medium"
+                      rows={3}
+                    />
+                  ) : (
+                    <input
+                      value={val}
+                      onChange={(e) => store.setAnswer(field.id, e.target.value)}
+                      type={field.field_type === 'number' ? 'number' : field.field_type === 'email' ? 'email' : 'text'}
+                      className="w-full bg-transparent border-b border-foreground/10 focus:border-foreground pb-1 focus:outline-none font-medium"
+                    />
+                  )}
+                </div>
+              )
+            })}
           </div>
         </motion.div>
 

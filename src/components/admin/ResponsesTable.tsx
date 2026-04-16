@@ -215,17 +215,35 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
                   const ans = answers.find(a => a.response_id === response.id && a.field_id === field.id)
                   return (
                     <td key={field.id} className="px-6 py-4 max-w-[200px]">
-                      {ans ? (
+                    {ans ? (() => {
+                      const v = ans.value
+                      const isImg = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(v)
+                      const isVid = /\.(mp4|mov|webm|ogg)$/i.test(v)
+                      const isUrl = v.startsWith('http')
+                      if (isImg && isUrl) return (
+                        <a href={v} target="_blank" rel="noopener noreferrer">
+                          {/* eslint-disable-next-line @next/next/no-img-element */}
+                          <img src={v} alt="upload" className="h-10 w-10 rounded-lg object-cover border border-foreground/10 hover:opacity-80 transition-opacity" />
+                        </a>
+                      )
+                      if (isVid && isUrl) return (
+                        <a href={v} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent-amber text-xs hover:opacity-80 transition-opacity">🎬 Video</a>
+                      )
+                      if (isUrl && !isImg && !isVid) return (
+                        <a href={v} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-accent-amber text-xs hover:opacity-80 transition-opacity truncate max-w-[150px]">📎 File</a>
+                      )
+                      return (
                         <div className="flex items-center gap-2">
-                          <span className="text-foreground truncate" title={ans.value}>{ans.value}</span>
+                          <span className="text-foreground truncate" title={v}>{v}</span>
                           {ans.audio_url && (
                             <MinimalAudioPlayer url={ans.audio_url} />
                           )}
                         </div>
-                      ) : (
-                        <span className="text-foreground/30 italic">Skipped</span>
-                      )}
-                    </td>
+                      )
+                    })() : (
+                      <span className="text-foreground/30 italic">Skipped</span>
+                    )}
+                  </td>
                   )
                 })}
               </tr>
