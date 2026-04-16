@@ -6,7 +6,7 @@ import { saveForm } from '@/lib/actions/forms'
 import { Loader2, Plus, Trash2, CheckCircle2, Mic, Square, MicOff } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 
-type Field = { label: string; field_type: string; required: boolean }
+type Field = { label: string; field_type: string; required: boolean; options?: string[] }
 type Schema = { title: string; description: string; fields: Field[] }
 type InputMode = 'text' | 'voice'
 
@@ -102,7 +102,7 @@ export default function CreateFormPage() {
 
   function addField() {
     if (!schema) return
-    setSchema({ ...schema, fields: [...schema.fields, { label: 'New Field', field_type: 'text', required: false }] })
+    setSchema({ ...schema, fields: [...schema.fields, { label: 'New Field', field_type: 'text', required: false, options: [] }] })
   }
 
   function removeField(idx: number) {
@@ -302,38 +302,74 @@ export default function CreateFormPage() {
             <div className="pt-6 space-y-3">
               <h3 className="text-sm font-semibold text-foreground bg-foreground/[0.05] inline-block px-3 py-1 rounded-full mb-4">Fields</h3>
               {schema.fields.map((field, i) => (
-                <div key={i} className="flex gap-4 items-center bg-background p-4 rounded-xl border border-foreground/5 shadow-sm group">
-                  <input
-                    value={field.label}
-                    onChange={e => updateField(i, { label: e.target.value })}
-                    className="flex-1 bg-transparent font-medium focus:outline-none"
-                    placeholder="Field label"
-                  />
-                  <select
-                    value={field.field_type}
-                    onChange={e => updateField(i, { field_type: e.target.value })}
-                    className="bg-foreground/[0.03] border-none rounded-lg text-sm px-3 py-1.5 min-w-[120px] focus:ring-0"
-                  >
-                    <option value="text">Short Text</option>
-                    <option value="textarea">Long Text</option>
-                    <option value="number">Number</option>
-                    <option value="email">Email</option>
-                  </select>
-                  <label className="flex items-center gap-2 text-sm text-foreground/70 cursor-pointer">
+                <div key={i} className="space-y-2">
+                  <div className="flex gap-4 items-center bg-background p-4 rounded-xl border border-foreground/5 shadow-sm group">
                     <input
-                      type="checkbox"
-                      checked={field.required}
-                      onChange={e => updateField(i, { required: e.target.checked })}
-                      className="rounded border-foreground/20 text-accent-amber focus:ring-accent-amber bg-transparent"
+                      value={field.label}
+                      onChange={e => updateField(i, { label: e.target.value })}
+                      className="flex-1 bg-transparent font-medium focus:outline-none"
+                      placeholder="Field label"
                     />
-                    Required
-                  </label>
-                  <button
-                    onClick={() => removeField(i)}
-                    className="p-2 text-foreground/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded-lg hover:bg-red-400/10"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                    <select
+                      value={field.field_type}
+                      onChange={e => updateField(i, { field_type: e.target.value, options: e.target.value === 'mcq' ? (field.options || ['Option A', 'Option B']) : [] })}
+                      className="bg-foreground/[0.03] border-none rounded-lg text-sm px-3 py-1.5 min-w-[120px] focus:ring-0"
+                    >
+                      <option value="text">Short Text</option>
+                      <option value="textarea">Long Text</option>
+                      <option value="number">Number</option>
+                      <option value="email">Email</option>
+                      <option value="phone">Phone</option>
+                      <option value="mcq">Multiple Choice</option>
+                      <option value="file">File Upload</option>
+                    </select>
+                    <label className="flex items-center gap-2 text-sm text-foreground/70 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={field.required}
+                        onChange={e => updateField(i, { required: e.target.checked })}
+                        className="rounded border-foreground/20 text-accent-amber focus:ring-accent-amber bg-transparent"
+                      />
+                      Required
+                    </label>
+                    <button
+                      onClick={() => removeField(i)}
+                      className="p-2 text-foreground/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all rounded-lg hover:bg-red-400/10"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </div>
+                  {/* MCQ Options Editor */}
+                  {field.field_type === 'mcq' && (
+                    <div className="ml-4 flex flex-wrap gap-2 items-center pb-1">
+                      {(field.options || []).map((opt, oi) => (
+                        <span key={oi} className="flex items-center gap-1 bg-accent-amber/10 border border-accent-amber/20 rounded-full px-3 py-1 text-xs font-medium">
+                          <input
+                            value={opt}
+                            onChange={e => {
+                              const newOpts = [...(field.options || [])]
+                              newOpts[oi] = e.target.value
+                              updateField(i, { options: newOpts })
+                            }}
+                            className="bg-transparent focus:outline-none w-20"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const newOpts = (field.options || []).filter((_, idx) => idx !== oi)
+                              updateField(i, { options: newOpts })
+                            }}
+                            className="text-foreground/40 hover:text-red-400 transition-colors"
+                          >{'×'}</button>
+                        </span>
+                      ))}
+                      <button
+                        type="button"
+                        onClick={() => updateField(i, { options: [...(field.options || []), `Option ${(field.options?.length ?? 0) + 1}`] })}
+                        className="text-xs text-accent-amber hover:opacity-80 transition-opacity"
+                      >+ Add option</button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

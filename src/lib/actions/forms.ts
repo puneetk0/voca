@@ -6,6 +6,7 @@ interface FieldInput {
   label: string
   field_type: string
   required: boolean
+  options?: string[]
 }
 
 export async function saveForm(title: string, description: string, fields: FieldInput[]) {
@@ -27,7 +28,8 @@ export async function saveForm(title: string, description: string, fields: Field
     label: f.label,
     field_type: f.field_type,
     required: f.required,
-    order_index: i
+    order_index: i,
+    options: f.options && f.options.length > 0 ? f.options : null,
   }))
 
   const { error: fieldsErr } = await supabase.from('fields').insert(fieldsToInsert)
@@ -89,6 +91,33 @@ export async function deleteForm(formId: string) {
 
     revalidatePath('/admin')
     return { success: true }
+  } catch (error: any) {
+    return { error: error.message }
+  }
+}
+
+export async function updateFormSlug(formId: string, rawSlug: string) {
+  try {
+    const supabase = await createClient()
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) throw new Error('Unauthorized')
+
+    // Verify ownership
+    const { data: form } = await supabase.from('forms').select('user_id').eq('id', formId).single()
+    if (form?.user_id !== user.id) throw new Error('Unauthorized')
+
+    // Slugify: lowercase, replace spaces/special chars with hyphens, trim hyphens
+    const slug = rawSlug.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    if (!slug || slug.length < 3) throw new Error('Slug must be at least 3 characters.')
+
+    const { error } = await supabase.from('forms').update({ slug }).eq('id', formId)
+    if (error) {
+      if (error.code === '23505') throw new Error('That slug is already taken. Try another.')
+      throw new Error(error.message)
+    }
+
+    revalidatePath(`/admin/forms/${formId}`)
+    return { success: true, slug }
   } catch (error: any) {
     return { error: error.message }
   }

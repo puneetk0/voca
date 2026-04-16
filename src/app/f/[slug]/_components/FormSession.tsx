@@ -8,6 +8,7 @@ import { submitResponse } from '@/lib/actions/submit'
 import { useVoiceRecorder } from '@/lib/hooks/useVoiceRecorder'
 import Waveform from '@/components/voice/Waveform'
 import Typewriter, { TypewriterHandle } from '@/components/chat/Typewriter'
+import { createClient } from '@/lib/supabase/client'
 
 type VoiceState = 'idle' | 'thinking' | 'speaking' | 'listening' | 'transcribing' | 'error'
 
@@ -55,6 +56,7 @@ export default function FormSession({
   const store = useConversationStore()
   const [inputText, setInputText] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [isUploading, setIsUploading] = useState(false)
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
   // audioRef must be created on a direct user gesture to satisfy browser autoplay policy.
   // We create it the moment the user taps "Talk with me" — NOT lazily later.
@@ -215,6 +217,7 @@ export default function FormSession({
     mode: 'text' | 'voice',
     onSuccess: (aiMessage: string, isComplete: boolean) => void,
     extraContext?: string,
+    confidence?: number,
   ) => {
     store.setIsAiTyping(true)
     store.setConnectionLost(false)
@@ -227,6 +230,7 @@ export default function FormSession({
       userMessage,
       userEmail,
       ...(extraContext ? { extraContext } : {}),
+      confidence,
     })
 
     if (result.timedOut) {
@@ -241,6 +245,7 @@ export default function FormSession({
         history: store.history,
         userMessage,
         userEmail,
+        confidence,
       })
 
       if (retry.data) {
@@ -269,7 +274,18 @@ export default function FormSession({
     const data = result.data
     store.setConnectionLost(false)
 
-    if (data.extractedValue) store.setAnswer(fields[fieldIndex].id, data.extractedValue)
+    if (data.extractedValues) {
+      Object.entries(data.extractedValues).forEach(([id, val]) => {
+        store.setAnswer(id, val as string)
+      })
+    } else if (data.extractedValue) {
+      store.setAnswer(fields[fieldIndex].id, data.extractedValue)
+    }
+    
+    if (data.sentiment) {
+      store.setSentiment(fields[fieldIndex].id, data.sentiment)
+    }
+    
     if (data.nextFieldIndex !== undefined) store.setNextField(data.nextFieldIndex)
 
     if (data.aiMessage) {
@@ -300,7 +316,7 @@ export default function FormSession({
 
   // --- VOICE TRANSCRIPT HANDLER ---
   const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream } = useVoiceRecorder(
-    async (transcript, audioBlob) => {
+    async (transcript, audioBlob, confidence) => {
       // Guard 1: AI is still speaking — ignore, VAD fired too early
       if (isSpeakingRef.current) return
       // Guard 2: Already processing a transcript — ignore duplicate VAD fires
@@ -354,7 +370,7 @@ export default function FormSession({
           if (!isComplete) startRecording()
           else store.setMode('review')
         })
-      })
+      }, undefined, confidence)
 
       // If handleConverseResponse errored without calling onSuccess, unlock the guard
       if (isHandlingTranscriptRef.current && voiceState === 'error') {
@@ -428,6 +444,7 @@ export default function FormSession({
       formData.append('formId', form.id)
       formData.append('inputMethod', inputMethod)
       formData.append('answers', JSON.stringify(store.answers))
+      formData.append('sentiments', JSON.stringify(store.sentiments))
       formData.append('history', JSON.stringify(store.history))
 
       Object.entries(store.audioBlobs).forEach(([fieldId, audioBlob]) => {
@@ -618,18 +635,109 @@ export default function FormSession({
 
         </motion.div>
 
-        <button
-          onClick={() => {
-            isSpeakingRef.current = false
-            window.speechSynthesis.cancel()
-            if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
-            stopRecording()
-            store.setMode('text')
-          }}
-          className="text-sm text-foreground/30 hover:text-foreground/60 transition-colors py-2"
-        >
-          Switch to keyboard
-        </button>
+        {fields[store.currentFieldIndex]?.field_type === 'mcq' && fields[store.currentFieldIndex]?.options?.length > 0 && (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="w-full flex justify-center flex-wrap gap-2 px-4"
+          >
+            {fields[store.currentFieldIndex].options.map((opt: string) => (
+              <button
+                key={opt}
+                onClick={async () => {
+                  isSpeakingRef.current = false
+                  window.speechSynthesis.cancel()
+                  if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
+                  stopRecording()
+                  
+                  // Visual feed
+                  store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Selected: ${opt}]` })
+                  
+                  // Silent override to converse
+                  await handleConverseResponse(`[User tapped: ${opt}]`, store.currentFieldIndex, 'voice', (aiMessage, isComplete) => {
+                    playSmartAudio(aiMessage, () => {
+                      isHandlingTranscriptRef.current = false
+                      setVoiceState('idle')
+                      if (!isComplete) startRecording()
+                      else store.setMode('review')
+                    })
+                  })
+                }}
+                className="px-6 py-3 rounded-full bg-foreground/[0.04] hover:bg-foreground/[0.08] border border-foreground/10 text-foreground font-medium transition-all text-sm"
+              >
+                {opt}
+              </button>
+            ))}
+          </motion.div>
+        )}
+
+        {fields[store.currentFieldIndex]?.field_type === 'file' && (
+          <div className="w-full max-w-xs mx-auto mt-2 mb-4 px-4 relative z-20">
+            <label className={`w-full flex justify-center items-center px-4 py-6 border-2 border-dashed border-foreground/20 rounded-2xl cursor-pointer hover:bg-foreground/[0.04] transition-colors ${isUploading ? 'opacity-50 pointer-events-none' : ''}`}>
+              <span className="text-foreground/50 font-medium text-sm">
+                {isUploading ? 'Uploading...' : 'Tap to upload document'}
+              </span>
+              <input type="file" className="hidden" onChange={async (e) => {
+                const file = e.target.files?.[0]
+                if (!file) return
+                
+                setIsUploading(true)
+                isSpeakingRef.current = false
+                window.speechSynthesis.cancel()
+                if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
+                stopRecording()
+                setVoiceState('thinking')
+
+                const supabase = createClient()
+                const ext = file.name.split('.').pop()
+                const fileName = `${Date.now()}-${Math.random().toString(36).substring(7)}.${ext}`
+                
+                const { error } = await supabase.storage
+                  .from('user_files')
+                  .upload(fileName, file)
+                  
+                setIsUploading(false)
+                
+                if (error) {
+                    store.addMessage({ id: Date.now().toString(), role: 'ai', text: `Upload failed: ${error.message}` })
+                    setVoiceState('idle')
+                    startRecording()
+                    return
+                }
+
+                const { data: publicData } = supabase.storage.from('user_files').getPublicUrl(fileName)
+                
+                store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Uploaded File: ${file.name}]` })
+                  
+                await handleConverseResponse(`[System: User uploaded file: ${publicData.publicUrl}]`, store.currentFieldIndex, 'voice', (aiMessage, isComplete) => {
+                  playSmartAudio(aiMessage, () => {
+                    isHandlingTranscriptRef.current = false
+                    setVoiceState('idle')
+                    if (!isComplete) startRecording()
+                    else store.setMode('review')
+                  })
+                })
+              }} />
+            </label>
+          </div>
+        )}
+
+        {/* Epic 3: Text Override Input */}
+        <div className="w-full max-w-xs mx-auto pb-4 pt-6 z-20">
+          <input
+            type="text"
+            placeholder="Tap to type instead..."
+            onFocus={() => {
+              isSpeakingRef.current = false
+              window.speechSynthesis.cancel()
+              if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
+              stopRecording()
+              setVoiceState('idle')
+              store.setMode('text')
+            }}
+            className="w-full bg-foreground/[0.04] border border-foreground/10 text-foreground rounded-full px-6 py-4 focus:outline-none focus:ring-2 focus:ring-accent-amber/50 placeholder:text-foreground/40 transition-all font-sans text-center text-sm shadow-sm hover:bg-foreground/[0.06]"
+          />
+        </div>
       </main>
     )
   }

@@ -51,6 +51,13 @@ FIELD TYPE: Long text / paragraph
 - Accept the full response as-is. Don't truncate or summarize.
 - If the response seems very short for a textarea field, you can gently ask: "Want to add anything else, or is that good?"`
 
+    case 'file':
+      return `
+FIELD TYPE: File Upload (Document, Resume, Image, etc.)
+- DO NOT ask them to spell out or describe the file verbally.
+- Explicitly instruct them to tap the upload zone on their screen.
+- If they just uploaded a file (you'll see a [System: User uploaded file: URL] message), set the extractedValue to that URL.`
+
     default:
       return `FIELD TYPE: Short text — accept the response as-is after cleaning up obvious transcription noise.`
   }
@@ -75,12 +82,18 @@ FIELD TYPE: Long text / paragraph
 function buildSystemPrompt(
   formTitle: string,
   fieldType: string,
-  allFields: Array<{ label: string; field_type: string }>,
+  allFields: Array<{ id: string; label: string; field_type: string; logic_rules?: any[] }>,
   currentFieldLabel: string,
   userEmail?: string,
 ): string {
   const fieldRules = getFieldRules(fieldType, userEmail)
-  const fieldList = allFields.map((f, i) => `${i + 1}. ${f.label} (${f.field_type})`).join('\n')
+  const fieldList = allFields.map((f, i) => {
+    let ruleText = ''
+    if (f.logic_rules && f.logic_rules.length > 0) {
+      ruleText = ` [Branching Rules: ${JSON.stringify(f.logic_rules)}]`
+    }
+    return `${i}. [ID: ${f.id}] ${f.label} (${f.field_type})${ruleText}`
+  }).join('\n')
 
   return `You are having a friendly, flowing conversation to help someone fill out a form called "${formTitle}".
 
@@ -115,7 +128,18 @@ FORMAT RULES (your responses are read aloud by a voice engine — this is critic
 ${fieldRules}
 
 RESPONSE FORMAT: Valid JSON only, nothing else, no markdown fences:
-{"extractedValue": "clean extracted answer as string, or null", "spokenMessage": "your full conversational spoken response including contextual bridge words (e.g. 'Gotcha Puneet! What course are you pursuing?')", "displayedMessage": "ONLY the core question to display on screen. MUST BE 100% FORMAL ENGLISH, NEVER HINGLISH OR HINDI (e.g. 'What course are you pursuing right now?')"}
+{
+  "extractedValues": { "field_id_abc123": "extracted value if answered" },
+  "nextFieldIndex": 4,
+  "sentiment": "positive | neutral | hesitant | frustrated",
+  "spokenMessage": "your conversational audio script goes here",
+  "displayedMessage": "ONLY the core question to display on screen. MUST BE 100% FORMAL ENGLISH, NEVER HINGLISH OR HINDI"
+}
+
+IMPORTANT FOR JSON SCHEMA:
+- "extractedValues": Return a JSON object mapping the field ID to its extracted value. You can extract multiple fields at once if the user answers upcoming questions preemptively! If nothing was valid, leave the object empty or null.
+- "nextFieldIndex": The 0-indexed integer of the NEXT field to ask. Usually this is just current + 1. However, if a condition in the [Branching Rules] of the current or future fields is met, SKIP ahead to the appropriate index!
+- "sentiment": Analyze the underlying emotion of the user's latest message. Pick one of the four options.
 `
 }
 
@@ -128,6 +152,7 @@ export async function POST(req: Request) {
       userMessage,
       extraContext,
       userEmail,
+      confidence,
     } = await req.json()
 
     if (ratelimit) {
@@ -177,7 +202,7 @@ export async function POST(req: Request) {
     const systemInstruction = buildSystemPrompt(
       form.title,
       currentField.field_type,
-      fields.map(f => ({ label: f.label, field_type: f.field_type })),
+      fields.map(f => ({ id: f.id, label: f.label, field_type: f.field_type, logic_rules: f.logic_rules })),
       currentField.label,
       userEmail,
     )
@@ -212,39 +237,46 @@ export async function POST(req: Request) {
       userPrompt,
     )
 
-    let parsed: { extractedValue: string | null; spokenMessage: string; displayedMessage: string }
+    let parsed: { extractedValues?: Record<string, string>; extractedValue?: string | null; nextFieldIndex?: number; sentiment?: string; spokenMessage: string; displayedMessage: string }
     try {
-      // Strip markdown code fences Gemini sometimes adds despite instructions
       const cleaned = responseText
         .replace(/^```(?:json)?\s*/i, '')
         .replace(/\s*```$/i, '')
         .trim()
       parsed = JSON.parse(cleaned)
 
-      // Fallback handlers if Gemini reverts to old schema
       if (!parsed.spokenMessage && (parsed as any).aiMessage) {
         parsed.spokenMessage = (parsed as any).aiMessage
         parsed.displayedMessage = (parsed as any).aiMessage
       }
     } catch {
-      // Last resort: treat entire response as the message, don't extract a value
       parsed = {
-        extractedValue: null,
         spokenMessage: responseText.slice(0, 200),
         displayedMessage: responseText.slice(0, 200)
       }
     }
 
-    const nextIndex = parsed.extractedValue !== null
-      ? Math.min(currentFieldIndex + 1, fields.length)
-      : currentFieldIndex
+    // Support legacy scalar extraction or new multi-intent map
+    const hasValues = parsed.extractedValues && Object.keys(parsed.extractedValues).length > 0;
+    const extractedObject = hasValues ? parsed.extractedValues : (parsed.extractedValue ? { [currentField.id]: parsed.extractedValue } : null);
+
+    const nextIndex = parsed.nextFieldIndex !== undefined 
+      ? parsed.nextFieldIndex 
+      : (extractedObject !== null ? Math.min(currentFieldIndex + 1, fields.length) : currentFieldIndex);
+      
+    // Epic 7: Confidence-based sentiment correction to prevent false positives
+    let finalSentiment = parsed.sentiment || 'neutral'
+    if (confidence !== undefined && confidence < 0.70) {
+      finalSentiment = 'neutral'
+    }
 
     return NextResponse.json({
       aiSpokenMessage: parsed.spokenMessage,
       aiMessage: parsed.displayedMessage,
-      extractedValue: parsed.extractedValue,
+      extractedValues: extractedObject,
       nextFieldIndex: nextIndex,
-      isComplete: isLastField && parsed.extractedValue !== null,
+      sentiment: finalSentiment,
+      isComplete: isLastField && extractedObject !== null,
     })
 
   } catch (error: any) {

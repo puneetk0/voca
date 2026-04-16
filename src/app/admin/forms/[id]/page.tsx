@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation'
 import { CopyLinkButton } from '@/components/admin/CopyLinkButton'
 import { ExportCSVButton } from '@/components/admin/ExportCSVButton'
 import { FormActions } from '@/components/admin/FormActions'
+import { SlugEditor } from '@/components/admin/SlugEditor'
 import ResponsesTable from '@/components/admin/ResponsesTable'
 import { ArrowLeft } from 'lucide-react'
 
@@ -38,7 +39,7 @@ export default async function FormDashboard({ params }: { params: Promise<{ id: 
   const responseIds = responses?.map(r => r.id) || []
   const { data: _answers } = await supabase
     .from('answers')
-    .select('response_id, field_id, value, audio_url')
+    .select('response_id, field_id, value, audio_url, sentiment')
     .in('response_id', responseIds)
 
   const answers = _answers || []
@@ -56,9 +57,10 @@ export default async function FormDashboard({ params }: { params: Promise<{ id: 
         </div>
         
         <div className="flex flex-col items-start md:items-end gap-3">
+          <SlugEditor formId={form.id} initialSlug={form.slug} />
           <span className="text-xs font-medium uppercase tracking-wider text-foreground/40 pl-2">Actions</span>
           <div className="flex items-center gap-2">
-            <CopyLinkButton formId={form.id} />
+            <CopyLinkButton formId={form.slug ?? form.id} />
             <ExportCSVButton 
               formId={form.id} 
               formTitle={form.title}

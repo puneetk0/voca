@@ -5,7 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { Mic, Keyboard, PlayCircle, PauseCircle, Loader2 } from 'lucide-react'
 
 interface Field { id: string; label: string; order_index: number }
-interface Answer { response_id: string; field_id: string; value: string; audio_url?: string | null }
+interface Answer { response_id: string; field_id: string; value: string; audio_url?: string | null; sentiment?: string | null }
 interface Response { id: string; input_method: string; submitted_at: string }
 
 interface Props {
@@ -102,7 +102,7 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
             await new Promise(r => setTimeout(r, 600))
             const { data: newAnswers } = await supabase
               .from('answers')
-              .select('response_id, field_id, value, audio_url')
+              .select('response_id, field_id, value, audio_url, sentiment')
               .eq('response_id', newResponse.id)
 
             if (newAnswers && newAnswers.length > 0) {
@@ -129,58 +129,110 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
     )
   }
 
+  const calculateAnalytics = () => {
+    if (responses.length === 0) return { total: 0, positive: 0, neutral: 0, hesitant: 0, frustrated: 0 }
+    
+    let pos = 0, neu = 0, hes = 0, frus = 0;
+    
+    // We try to find the overall sentiment of a response by taking the last non-null sentiment
+    responses.forEach(r => {
+      const parts = answers.filter(a => a.response_id === r.id && a.sentiment);
+      if (parts.length > 0) {
+        const primary = parts[parts.length - 1].sentiment
+        if (primary === 'positive') pos++;
+        else if (primary === 'hesitant') hes++;
+        else if (primary === 'frustrated') frus++;
+        else neu++;
+      } else {
+        neu++; // fallback
+      }
+    })
+    
+    return { 
+      total: responses.length, 
+      positive: pos, 
+      neutral: neu, 
+      hesitant: hes, 
+      frustrated: frus 
+    }
+  }
+
+  const stat = calculateAnalytics()
+
   return (
-    <div className="relative overflow-x-auto rounded-2xl border border-foreground/10 bg-foreground/[0.02]">
-      <table className="w-full text-sm text-left whitespace-nowrap">
-        <thead className="bg-foreground/[0.03] text-foreground/60 border-b border-foreground/10 uppercase text-xs tracking-wider">
-          <tr>
-            <th scope="col" className="px-6 py-4 font-medium">Date</th>
-            <th scope="col" className="px-6 py-4 font-medium">Input</th>
-            {fields.map(field => (
-              <th key={field.id} scope="col" className="px-6 py-4 font-medium max-w-[200px] truncate" title={field.label}>
-                {field.label}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {responses.map((response) => (
-            <tr key={response.id} className="border-b border-foreground/5 last:border-0 hover:bg-foreground/[0.04] transition-colors">
-              <td className="px-6 py-4 text-foreground/70">
-                {new Date(response.submitted_at).toLocaleDateString('en-GB')}
-              </td>
-              <td className="px-6 py-4">
-                {response.input_method === 'voice' ? (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-accent-sage/10 px-2.5 py-1 text-xs font-medium text-accent-sage ring-1 ring-inset ring-accent-sage/20">
-                    <Mic className="h-3 w-3" /> Voice
-                  </span>
-                ) : (
-                  <span className="inline-flex items-center gap-1.5 rounded-full bg-foreground/10 px-2.5 py-1 text-xs font-medium text-foreground/70 ring-1 ring-inset ring-foreground/20">
-                    <Keyboard className="h-3 w-3" /> Text
-                  </span>
-                )}
-              </td>
-              {fields.map(field => {
-                const ans = answers.find(a => a.response_id === response.id && a.field_id === field.id)
-                return (
-                  <td key={field.id} className="px-6 py-4 max-w-[200px]">
-                    {ans ? (
-                      <div className="flex items-center gap-2">
-                        <span className="text-foreground truncate" title={ans.value}>{ans.value}</span>
-                        {ans.audio_url && (
-                          <MinimalAudioPlayer url={ans.audio_url} />
-                        )}
-                      </div>
-                    ) : (
-                      <span className="text-foreground/30 italic">Skipped</span>
-                    )}
-                  </td>
-                )
-              })}
+    <div className="space-y-8">
+      {/* Epic 7: Analytics Dashboard */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="bg-foreground/[0.02] border border-foreground/10 rounded-2xl p-6">
+          <p className="text-sm text-foreground/50 font-medium">Total Responses</p>
+          <p className="text-3xl font-serif mt-2">{stat.total}</p>
+        </div>
+        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-6">
+          <p className="text-sm text-emerald-600/80 font-medium">Positive Tone</p>
+          <p className="text-3xl font-serif mt-2 text-emerald-600">{stat.positive}</p>
+        </div>
+        <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-6">
+          <p className="text-sm text-amber-600/80 font-medium">Hesitant</p>
+          <p className="text-3xl font-serif mt-2 text-amber-600">{stat.hesitant}</p>
+        </div>
+        <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-6">
+          <p className="text-sm text-red-600/80 font-medium">Frustrated</p>
+          <p className="text-3xl font-serif mt-2 text-red-600">{stat.frustrated}</p>
+        </div>
+      </div>
+
+      <div className="relative overflow-x-auto rounded-2xl border border-foreground/10 bg-foreground/[0.02] max-h-[800px] overflow-y-auto">
+        <table className="w-full text-sm text-left whitespace-nowrap">
+          <thead className="bg-foreground/[0.03] text-foreground/60 border-b border-foreground/10 uppercase text-xs tracking-wider sticky top-0 z-10">
+            <tr>
+              <th scope="col" className="px-6 py-4 font-medium">Date</th>
+              <th scope="col" className="px-6 py-4 font-medium">Input</th>
+              {fields.map(field => (
+                <th key={field.id} scope="col" className="px-6 py-4 font-medium max-w-[200px] truncate" title={field.label}>
+                  {field.label}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {responses.map((response) => (
+              <tr key={response.id} className="border-b border-foreground/5 last:border-0 hover:bg-foreground/[0.04] transition-colors">
+                <td className="px-6 py-4 text-foreground/70">
+                  {new Date(response.submitted_at).toLocaleDateString('en-GB')}
+                </td>
+                <td className="px-6 py-4">
+                  {response.input_method === 'voice' ? (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-accent-sage/10 px-2.5 py-1 text-xs font-medium text-accent-sage ring-1 ring-inset ring-accent-sage/20">
+                      <Mic className="h-3 w-3" /> Voice
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 rounded-full bg-foreground/10 px-2.5 py-1 text-xs font-medium text-foreground/70 ring-1 ring-inset ring-foreground/20">
+                      <Keyboard className="h-3 w-3" /> Text
+                    </span>
+                  )}
+                </td>
+                {fields.map(field => {
+                  const ans = answers.find(a => a.response_id === response.id && a.field_id === field.id)
+                  return (
+                    <td key={field.id} className="px-6 py-4 max-w-[200px]">
+                      {ans ? (
+                        <div className="flex items-center gap-2">
+                          <span className="text-foreground truncate" title={ans.value}>{ans.value}</span>
+                          {ans.audio_url && (
+                            <MinimalAudioPlayer url={ans.audio_url} />
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-foreground/30 italic">Skipped</span>
+                      )}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

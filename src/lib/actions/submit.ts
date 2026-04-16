@@ -7,6 +7,7 @@ export async function submitResponse(formData: FormData) {
   const formId = formData.get('formId') as string
   const inputMethod = formData.get('inputMethod') as string
   const answers = JSON.parse(formData.get('answers') as string)
+  const sentiments = JSON.parse(formData.get('sentiments') as string || '{}')
   const history = JSON.parse(formData.get('history') as string)
 
   // 1. Insert Response
@@ -59,7 +60,8 @@ export async function submitResponse(formData: FormData) {
         }
       }
 
-      return { response_id: response.id, field_id, value: value as string, audio_url }
+      const sentiment = sentiments[field_id] || null
+      return { response_id: response.id, field_id, value: value as string, audio_url, sentiment }
     })
   )
 

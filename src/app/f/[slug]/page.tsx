@@ -6,19 +6,29 @@ export default async function ResponderPage({
   params,
   searchParams,
 }: {
-  params: Promise<{ id: string }>
+  params: Promise<{ slug: string }>
   searchParams: Promise<Record<string, string>>
 }) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
-  const { id } = await params
+  const { slug } = await params
   const rawSearch = await searchParams
 
-  const { data: form } = await supabase
+  let { data: form } = await supabase
     .from('forms')
     .select('*')
-    .eq('id', id)
+    .eq('slug', slug)
     .single()
+    
+  if (!form) {
+    const { data: formById } = await supabase
+      .from('forms')
+      .select('*')
+      .eq('id', slug)
+      .single()
+      
+    form = formById
+  }
     
   if (!form) return notFound()
 
@@ -40,7 +50,7 @@ export default async function ResponderPage({
   const { data: fields } = await supabase
     .from('fields')
     .select('*')
-    .eq('form_id', id)
+    .eq('form_id', form.id)
     .order('order_index')
     
   if (!fields) return notFound()

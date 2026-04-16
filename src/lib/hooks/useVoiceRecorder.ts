@@ -14,7 +14,7 @@ const FLOOR_MULTIPLIER = 1.25
 const FLOOR_MAX = 32                  // hard cap — prevents runaway floor in very noisy rooms
 
 export function useVoiceRecorder(
-  onTranscription: (text: string, audioBlob: Blob) => void,
+  onTranscription: (text: string, audioBlob: Blob, confidence: number) => void,
   formId: string,
 ) {
   const [isRecording, setIsRecording] = useState(false)
@@ -127,12 +127,12 @@ export function useVoiceRecorder(
           const data = await res.json()
           if (!res.ok) throw new Error(data.error)
 
-          onTranscriptionRef.current(data.transcript || '', audioBlob)
+          onTranscriptionRef.current(data.transcript || '', audioBlob, data.confidence || 1.0)
         } catch (e: any) {
           setError(e.message)
           console.error('Transcription failed:', e)
           // Still call onTranscription with empty string so UI can handle the error gracefully
-          onTranscriptionRef.current('', new Blob())
+          onTranscriptionRef.current('', new Blob(), 0)
         } finally {
           setIsProcessing(false)
           micStream.getTracks().forEach(track => track.stop())
