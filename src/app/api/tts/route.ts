@@ -105,7 +105,7 @@ export async function POST(req: Request) {
             speakingRate: 0.95,
             // Slight downward pitch — Neural2-C's default pitch is slightly
             // high; -1.0 brings it closer to natural male register.
-            pitch: -2.0,
+            pitch: 0.0,
             volumeGainDb: 1.5,
           },
         }),
