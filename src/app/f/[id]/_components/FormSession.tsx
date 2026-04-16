@@ -114,6 +114,29 @@ export default function FormSession({
     }
   }, [store.history, store.isAiTyping, store.mode])
 
+  // --- LATENCY MASKING ---
+  // Pre-fetch filler audio clips for latency masking.
+  // We keep a local cache of these clips to play instantly when the user stops talking,
+  // making the AI active and hiding the latency of Gemini and STT.
+  const fillerAudioRef = useRef<string[]>([])
+  useEffect(() => {
+    const fetchFillers = async () => {
+      try {
+        const fillers = ["Hmmmm......", "Okayyyy......", "Rightttt......", "Let's seeeee......"]
+        const results = await Promise.all(fillers.map(f =>
+          fetch('/api/tts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ formId: form.id, text: f }),
+          }).then(res => res.json())
+        ))
+        fillerAudioRef.current = results.map(r => r.audioContent).filter(Boolean)
+      } catch (e) { }
+    }
+    fetchFillers()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [form.id])
+
   // --- TTS ---
   // Plays AI response audio. Uses Google TTS with native SpeechSynthesis fallback.
   // isSpeakingRef is kept true for the entire playback duration to block
@@ -194,7 +217,7 @@ export default function FormSession({
   ) => {
     store.setIsAiTyping(true)
     store.setConnectionLost(false)
-    if (mode === 'voice') setVoiceState('thinking')
+    if (mode === 'voice') setVoiceState(prev => prev === 'speaking' ? 'speaking' : 'thinking')
 
     const result = await fetchConverse({
       formId: form.id,
@@ -224,7 +247,10 @@ export default function FormSession({
       } else {
         store.setConnectionLost(true)
         store.setIsAiTyping(false)
-        if (mode === 'voice') setVoiceState('error')
+        if (mode === 'voice') {
+          setVoiceState('error')
+          isSpeakingRef.current = false
+        }
         return
       }
     }
@@ -232,7 +258,10 @@ export default function FormSession({
     if (result.error || !result.data) {
       store.setConnectionLost(true)
       store.setIsAiTyping(false)
-      if (mode === 'voice') setVoiceState('error')
+      if (mode === 'voice') {
+        setVoiceState('error')
+        isSpeakingRef.current = false
+      }
       return
     }
 
@@ -260,7 +289,12 @@ export default function FormSession({
 
     const actuallyComplete = data.isComplete ||
       (data.nextFieldIndex !== undefined && data.nextFieldIndex >= fields.length)
-    if (data.aiMessage) onSuccess(data.aiMessage, actuallyComplete)
+
+    if (data.aiMessage) {
+      onSuccess(data.aiMessage, actuallyComplete)
+    } else {
+      isSpeakingRef.current = false
+    }
   }, [form.id, store, fields, userEmail])
 
   // --- VOICE TRANSCRIPT HANDLER ---
@@ -298,7 +332,18 @@ export default function FormSession({
         role: 'ai',
         text: getThinkingLabel(currentField?.field_type || 'text', cleanTranscript),
       })
-      setVoiceState('thinking')
+
+      // LATENCY MASKING: Instantly play a random filler right when processing starts
+      if (fillerAudioRef.current.length > 0 && audioRef.current) {
+        const base64 = fillerAudioRef.current[Math.floor(Math.random() * fillerAudioRef.current.length)]
+        audioRef.current.onended = null // CRITICAL: Clear old playback handlers!
+        isSpeakingRef.current = true    // CRITICAL: Lock VAD while filler plays
+        audioRef.current.src = `data:audio/mp3;base64,${base64}`
+        audioRef.current.play().catch(() => { })
+        setVoiceState('speaking') // turns the orb instantly yellow/active
+      } else {
+        setVoiceState('thinking')
+      }
 
       // Fire converse — no filler words, visual thinking state handles the wait
       await handleConverseResponse(cleanTranscript, fieldIndex, 'voice', (aiMessage, isComplete) => {
@@ -505,8 +550,8 @@ export default function FormSession({
 
         {/* Ambient background glow */}
         <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] rounded-full blur-[120px] -z-10 transition-colors duration-1000 ${voiceState === 'speaking' ? 'bg-accent-amber/8'
-            : voiceState === 'listening' ? 'bg-accent-sage/8'
-              : 'bg-transparent'
+          : voiceState === 'listening' ? 'bg-accent-sage/8'
+            : 'bg-transparent'
           }`} />
 
         <div />
@@ -604,8 +649,8 @@ export default function FormSession({
                 className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 <div className={`max-w-[85%] sm:max-w-[75%] p-4 rounded-3xl ${msg.role === 'user'
-                    ? 'bg-foreground/[0.05] text-foreground rounded-tr-sm'
-                    : 'bg-transparent text-foreground font-serif text-xl sm:text-2xl leading-relaxed py-4'
+                  ? 'bg-foreground/[0.05] text-foreground rounded-tr-sm'
+                  : 'bg-transparent text-foreground font-serif text-xl sm:text-2xl leading-relaxed py-4'
                   }`}>
                   {msg.role === 'ai' && idx === store.history.length - 1 && !store.isAiTyping ? (
                     <Typewriter ref={typewriterRef} text={msg.text.replace('[Voice]', '')} speed={35} />
