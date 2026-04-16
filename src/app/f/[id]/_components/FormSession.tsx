@@ -122,7 +122,7 @@ export default function FormSession({
   useEffect(() => {
     const fetchFillers = async () => {
       try {
-        const fillers = ["Hmmmm......", "Okayyyy......", "Rightttt......", "Let's seeeee......"]
+        const fillers = ["Ek second note karlu....."]
         const results = await Promise.all(fillers.map(f =>
           fetch('/api/tts', {
             method: 'POST',
