@@ -90,9 +90,9 @@ ${fieldList}
 YOUR CURRENT TASK: Extract the answer for "${currentFieldLabel}"
 
 CONVERSATION STYLE:
-- Speak like a real person, not a customer service script. Indian English / Hinglish is totally fine — "yaar", "na", "basically", "actually" are all natural here.
-- React genuinely to what they said before asking the next thing. If it's interesting, say so briefly. If they corrected themselves, reassure them.
-- Use their previous answers to make transitions feel connected. Example: if they said they're from Delhi and the next field is phone, say "Nice, Delhi! And what's the best number to reach you on?"
+- Speak like a highly empathetic, natural human. Indian English / Hinglish is perfectly fine — "yaar", "na", "basically" are great. Keep it incredibly warm, friendly, and welcoming. Add a subtle touch of lighthearted humor where natural to make them smile.
+- React genuinely to what they said. If it's an interesting course or a cool name, compliment it briefly before asking the next thing.
+- Use their previous answers to make transitions feel connected. Example: if they said they're from Delhi, say "Delhi! Love the food there! So what's the best number to reach you on?"
 - NEVER start your response with conversational filler words like "Perfect", "Got it", "Okay", "Hmm", "Right", "Interesting", or "Nice". Keep it lean and jump STRAIGHT into your response or the next question. Example: instead of "Perfect... Puneet right? What's the course...", just say "Puneet right? What's the course...". This is critical because the voice engine will automatically play a "Hmm..." sound before your text, so you must not double up.
 - If someone hesitates, self-corrects, or rambles — be warm: "Take your time" or just accept what makes sense and move on.
 - If the answer type is obviously wrong (name given instead of phone), be light about it: "Think I need your number there, not your name — what's a good one to reach you on?"
@@ -109,7 +109,8 @@ FORMAT RULES (your responses are read aloud by a voice engine — this is critic
 ${fieldRules}
 
 RESPONSE FORMAT: Valid JSON only, nothing else, no markdown fences:
-{"extractedValue": "clean extracted answer as string, or null if invalid/unclear", "aiMessage": "your spoken response"}`
+{"extractedValue": "clean extracted answer as string, or null", "spokenMessage": "your full conversational spoken response including contextual bridge words (e.g. 'Gotcha Puneet! What course are you pursuing?')", "displayedMessage": "ONLY the core question to display on screen (e.g. 'What course are you pursuing right now?')"}
+`
 }
 
 export async function POST(req: Request) {
@@ -182,11 +183,10 @@ export async function POST(req: Request) {
       .map((m: any) => `${m.role === 'ai' ? 'Assistant' : 'User'}: ${m.text.replace('[Voice] ', '')}`)
       .join('\n')
 
-    // Tell Gemini what's coming next so it can craft a natural transition,
-    // not just "Got it. What's your [label]?"
+    // Tell Gemini what's coming next so it can craft a natural transition
     const nextFieldContext = nextField
       ? `After extracting the current answer, transition naturally into asking about: "${nextField.label}" (${nextField.field_type}). Reference their previous answer if it makes the transition feel connected.`
-      : `This is the LAST field. After extracting the answer, close warmly and briefly — one sentence, like "That's everything, thankyou so much!" or "All done, appreciate it!" Keep it genuine, not scripted.`
+      : `This is the LAST field. After extracting the answer, close with a very warm, human thank you. For example, say it was great talking to them, thank them for their patience, and since they are filling a form, add a bright/humorous sign off like "Hope to see you there!" or something similarly natural.`
 
     const userPrompt = [
       extraContext ?? '',
@@ -206,7 +206,7 @@ export async function POST(req: Request) {
       userPrompt,
     )
 
-    let parsed: { extractedValue: string | null; aiMessage: string }
+    let parsed: { extractedValue: string | null; spokenMessage: string; displayedMessage: string }
     try {
       // Strip markdown code fences Gemini sometimes adds despite instructions
       const cleaned = responseText
@@ -214,9 +214,19 @@ export async function POST(req: Request) {
         .replace(/\s*```$/i, '')
         .trim()
       parsed = JSON.parse(cleaned)
+
+      // Fallback handlers if Gemini reverts to old schema
+      if (!parsed.spokenMessage && (parsed as any).aiMessage) {
+        parsed.spokenMessage = (parsed as any).aiMessage
+        parsed.displayedMessage = (parsed as any).aiMessage
+      }
     } catch {
       // Last resort: treat entire response as the message, don't extract a value
-      parsed = { extractedValue: null, aiMessage: responseText.slice(0, 200) }
+      parsed = {
+        extractedValue: null,
+        spokenMessage: responseText.slice(0, 200),
+        displayedMessage: responseText.slice(0, 200)
+      }
     }
 
     const nextIndex = parsed.extractedValue !== null
@@ -224,7 +234,8 @@ export async function POST(req: Request) {
       : currentFieldIndex
 
     return NextResponse.json({
-      aiMessage: parsed.aiMessage,
+      aiSpokenMessage: parsed.spokenMessage,
+      aiMessage: parsed.displayedMessage,
       extractedValue: parsed.extractedValue,
       nextFieldIndex: nextIndex,
       isComplete: isLastField && parsed.extractedValue !== null,

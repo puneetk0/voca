@@ -198,12 +198,13 @@ export default function FormSession({
     }
   }, [form.id])
 
-  // Optimistic thinking label shown while Gemini processes — more specific than "Thinking..."
+  // Optimistic thinking label shown while Gemini processes
   function getThinkingLabel(fieldType: string, transcript: string) {
+    if (store.mode === 'voice') return 'Extracting your answer...'
     const short = transcript.slice(0, 40)
-    if (fieldType === 'email') return `Extracting email from "${short}"...`
-    if (fieldType === 'number') return `Noting your number from "${short}"...`
-    if (fieldType === 'phone') return `Reading phone number from "${short}"...`
+    if (fieldType === 'email') return `Extracting your email.`
+    if (fieldType === 'number') return `Noting your number.`
+    if (fieldType === 'phone') return `Reading phone number.`
     return `Got that — processing "${short}"...`
   }
 
@@ -290,8 +291,8 @@ export default function FormSession({
     const actuallyComplete = data.isComplete ||
       (data.nextFieldIndex !== undefined && data.nextFieldIndex >= fields.length)
 
-    if (data.aiMessage) {
-      onSuccess(data.aiMessage, actuallyComplete)
+    if (data.aiMessage || data.aiSpokenMessage) {
+      onSuccess(data.aiSpokenMessage || data.aiMessage, actuallyComplete)
     } else {
       isSpeakingRef.current = false
     }
