@@ -85,22 +85,62 @@ export async function POST(req: Request) {
       )
     }
 
-    // --- GOOGLE CLOUD STT PATH ---
+    // --- GROQ WHISPER PATH (PRIMARY) ---
+    if (hasGroq) {
+      try {
+        const groqData = new FormData()
+
+        // Determine filename extension — Groq requires a filename to sniff format
+        const ext = clientMimeType.includes('mp4') ? 'mp4'
+          : clientMimeType.includes('ogg') ? 'ogg'
+            : 'webm'
+        groqData.append('file', file, `audio.${ext}`)
+        groqData.append('model', 'whisper-large-v3-turbo')
+        groqData.append('response_format', 'verbose_json')
+        groqData.append('language', 'en')
+        // Priming prompt conditions Whisper on Indian English and prevents
+        // silence hallucination (Whisper sometimes invents phrases on silence/noise)
+        groqData.append(
+          'prompt',
+          'Transcribe this form response. Speaker uses Indian English or Hinglish. Common words: okay, yes, no, actually, basically, na, yaar, theek hai.',
+        )
+
+        const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${keys!.groq_key}` },
+          body: groqData as unknown as BodyInit,
+        })
+
+        const groqJson = await groqRes.json()
+        
+        if (!groqRes.ok) {
+          console.error('Groq STT error:', groqJson)
+          if (!hasGoogleSTT) throw new Error(groqJson.error?.message || 'Groq transcription failed')
+          console.warn('[STT] Groq failed, falling back to Google...')
+        } else {
+          // Convert log-prob to 0-1 confidence score
+          const groqConfidence = groqJson.segments?.[0]?.avg_logprob
+            ? Math.exp(groqJson.segments[0].avg_logprob)
+            : 0.9
+
+          return NextResponse.json({
+            transcript: groqJson.text ?? '',
+            confidence: groqConfidence,
+          })
+        }
+      } catch (groqErr: any) {
+        if (!hasGoogleSTT) throw groqErr
+        console.warn('[STT] Groq exception, falling back to Google:', groqErr.message)
+      }
+    }
+
+    // --- GOOGLE CLOUD STT PATH (FALLBACK) ---
     if (hasGoogleSTT) {
       try {
         const arrayBuffer = await file.arrayBuffer()
         const audioBase64 = Buffer.from(arrayBuffer).toString('base64')
         const encoding = getMimeEncoding(clientMimeType || (file as File).type || '')
 
-        // v1p1beta1 supports:
-        // - enableAutomaticPunctuation (critical for Gemini downstream parsing)
-        // - alternativeLanguageCodes for Hinglish code-switching
-        // - enableWordConfidence for downstream low-confidence detection
-        // Note: We do NOT pass model: "chirp_2" here because Chirp 2 requires
-        // a service account (OAuth2), not an API key. With API key auth, the
-        // model field is silently ignored and falls back to "latest_long" anyway,
-        // so omitting it avoids a misleading config. Chirp 2 upgrade path:
-        // switch to service account auth + model: "chirp_2" when ready.
         const sttUrl = `https://speech.googleapis.com/v1p1beta1/speech:recognize?key=${keys!.google_tts_key}`
 
         const googleRes = await fetch(sttUrl, {
@@ -113,9 +153,6 @@ export async function POST(req: Request) {
               alternativeLanguageCodes: ['hi-IN'],
               enableAutomaticPunctuation: true,
               enableWordConfidence: true,
-              // useEnhanced: true uses the enhanced model (better accuracy for
-              // conversational speech) — available on v1p1beta1 at no extra cost
-              // for supported languages.
               useEnhanced: true,
             },
             audio: { content: audioBase64 },
@@ -125,57 +162,19 @@ export async function POST(req: Request) {
         const googleJson = await googleRes.json()
 
         if (!googleRes.ok) {
-          console.error('Google STT error:', googleJson)
-          if (!hasGroq) throw new Error(googleJson.error?.message || 'Google STT failed')
-          console.warn('[STT] Google failed, falling back to Groq...')
-        } else {
-          const result = googleJson.results?.[0]?.alternatives?.[0]
-          const transcript = result?.transcript ?? ''
-          const confidence = result?.confidence ?? 1.0
-          return NextResponse.json({ transcript, confidence })
+          console.error('Google STT fallback error:', googleJson)
+          throw new Error(googleJson.error?.message || 'Google STT fallback failed')
         }
+
+        const result = googleJson.results?.[0]?.alternatives?.[0]
+        return NextResponse.json({ 
+          transcript: result?.transcript ?? '', 
+          confidence: result?.confidence ?? 1.0 
+        })
       } catch (googleErr: any) {
-        if (!hasGroq) throw googleErr
-        console.warn('[STT] Google exception, falling back to Groq:', googleErr.message)
+        throw googleErr
       }
     }
-
-    // --- GROQ WHISPER FALLBACK PATH ---
-    const groqData = new FormData()
-
-    // Determine filename extension — Groq requires a filename to sniff format
-    const ext = clientMimeType.includes('mp4') ? 'mp4'
-      : clientMimeType.includes('ogg') ? 'ogg'
-        : 'webm'
-    groqData.append('file', file, `audio.${ext}`)
-    groqData.append('model', 'whisper-large-v3-turbo')
-    groqData.append('response_format', 'verbose_json')
-    groqData.append('language', 'en')
-    // Priming prompt conditions Whisper on Indian English and prevents
-    // silence hallucination (Whisper sometimes invents phrases on silence/noise)
-    groqData.append(
-      'prompt',
-      'Transcribe this form response. Speaker uses Indian English or Hinglish. Common words: okay, yes, no, actually, basically, na, yaar, theek hai.',
-    )
-
-    const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${keys!.groq_key}` },
-      body: groqData as unknown as BodyInit,
-    })
-
-    const groqJson = await groqRes.json()
-    if (!groqRes.ok) throw new Error(groqJson.error?.message || 'Groq transcription failed')
-
-    // Convert log-prob to 0-1 confidence score
-    const groqConfidence = groqJson.segments?.[0]?.avg_logprob
-      ? Math.exp(groqJson.segments[0].avg_logprob)
-      : 0.9
-
-    return NextResponse.json({
-      transcript: groqJson.text ?? '',
-      confidence: groqConfidence,
-    })
 
   } catch (err: any) {
     console.error('Transcription error:', err)
