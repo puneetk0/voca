@@ -16,14 +16,14 @@ export default async function ResponderPage({
 
   let { data: form } = await supabase
     .from('forms')
-    .select('*')
+    .select('id, title, description, slug, is_active')
     .eq('slug', slug)
     .single()
     
   if (!form) {
     const { data: formById } = await supabase
       .from('forms')
-      .select('*')
+      .select('id, title, description, slug, is_active')
       .eq('id', slug)
       .single()
       
@@ -49,7 +49,7 @@ export default async function ResponderPage({
   // Fields are public if form is active
   const { data: fields } = await supabase
     .from('fields')
-    .select('*')
+    .select('id, label, field_type, required, order_index, options, logic_rules')
     .eq('form_id', form.id)
     .order('order_index')
     

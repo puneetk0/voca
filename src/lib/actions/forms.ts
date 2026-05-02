@@ -23,6 +23,8 @@ export async function saveForm(title: string, description: string, fields: Field
 
   if (formErr) throw new Error(formErr.message)
 
+  if (!fields || fields.length === 0) throw new Error('A form must have at least one field.')
+
   const fieldsToInsert = fields.map((f, i) => ({
     form_id: form.id,
     label: f.label,

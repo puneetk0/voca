@@ -59,8 +59,10 @@ FIELD TYPE: File Upload (Document, Resume, Image, etc.)
 - If they just uploaded a file (you'll see a [System: User uploaded file: URL] message), set the extractedValue to that URL.`
 
     case 'mcq': {
-      // options come from currentField — injected dynamically below
-      return '__MCQ_RULES__'
+      // Runtime MCQ options are injected in buildSystemPrompt.
+      // Return a safe fallback in case options weren't passed (should never happen).
+      return `FIELD TYPE: Multiple Choice
+- Respond with one of the options shown to the user. Do not accept free-form answers.`
     }
 
     default:
@@ -192,11 +194,13 @@ export async function POST(req: Request) {
       }
     }
 
-    const { data: form } = await supabaseAdmin
-      .from('forms')
-      .select('user_id, title')
-      .eq('id', formId)
-      .single()
+    // Perf: fetch form + fields in parallel — only keys fetch depends on form.user_id
+    const [formResult, fieldsResult] = await Promise.all([
+      supabaseAdmin.from('forms').select('user_id, title').eq('id', formId).single(),
+      supabaseAdmin.from('fields').select('*').eq('form_id', formId).order('order_index'),
+    ])
+
+    const form = formResult.data
     if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
 
     const { data: keys } = await supabaseAdmin
@@ -211,18 +215,13 @@ export async function POST(req: Request) {
       )
     }
 
-    const { data: fields } = await supabaseAdmin
-      .from('fields')
-      .select('*')
-      .eq('form_id', formId)
-      .order('order_index')
+    const fields = fieldsResult.data
     if (!fields || fields.length === 0) {
       return NextResponse.json({ error: 'Form fields not found' }, { status: 404 })
     }
 
     const currentField = fields[currentFieldIndex]
     const isLastField = currentFieldIndex === fields.length - 1
-    const nextField = !isLastField ? fields[currentFieldIndex + 1] : null
 
     const systemInstruction = buildSystemPrompt(
       form.title,
@@ -241,6 +240,7 @@ export async function POST(req: Request) {
       .join('\n')
 
     // Tell Gemini what's coming next so it can craft a natural transition
+    const nextField = !isLastField ? fields[currentFieldIndex + 1] : null
     const nextFieldContext = nextField
       ? `After extracting the current answer, transition naturally into asking about: "${nextField.label}" (${nextField.field_type}). Reference their previous answer if it makes the transition feel connected.`
       : `This is the LAST field. After extracting the answer, close with a very warm, human thank you. For example, say it was great talking to them, thank them for their patience, and since they are filling a form, add a bright/humorous sign off like "Hope to see you there!" or something similarly natural.`

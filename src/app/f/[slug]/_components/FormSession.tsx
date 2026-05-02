@@ -3,12 +3,13 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useConversationStore } from '@/lib/store/conversation'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Mic, Keyboard, Send, CheckCircle2, Square, WifiOff, ExternalLink } from 'lucide-react'
+import { Mic, Keyboard, Send, CheckCircle2, Square, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react'
 import { submitResponse } from '@/lib/actions/submit'
 import { useVoiceRecorder } from '@/lib/hooks/useVoiceRecorder'
 import Waveform from '@/components/voice/Waveform'
 import Typewriter, { TypewriterHandle } from '@/components/chat/Typewriter'
 import { createClient } from '@/lib/supabase/client'
+import { toast } from 'sonner'
 
 type VoiceState = 'idle' | 'thinking' | 'speaking' | 'listening' | 'transcribing' | 'error'
 
@@ -18,7 +19,7 @@ const GHOST_MESSAGES = [
   "Almost there, one moment.",
 ]
 
-const CONVERSE_TIMEOUT_MS = 8000
+const CONVERSE_TIMEOUT_MS = 6000
 
 /** Fetch /api/converse with AbortController timeout */
 async function fetchConverse(body: object): Promise<{ data?: any; timedOut?: boolean; error?: string }> {
@@ -56,8 +57,12 @@ export default function FormSession({
   const store = useConversationStore()
   const [inputText, setInputText] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false)
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
+  // Ref that mirrors voiceState — allows reading current value inside async closures
+  // without stale-closure bugs (React state is always the captured render value)
+  const voiceStateRef = useRef<VoiceState>('idle')
   // audioRef must be created on a direct user gesture to satisfy browser autoplay policy.
   // We create it the moment the user taps "Talk with me" — NOT lazily later.
   // On iOS, an Audio element created outside a user gesture will be blocked silently.
@@ -123,6 +128,43 @@ export default function FormSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.id])
 
+  // Keep voiceStateRef in sync so async callbacks always read the current value
+  useEffect(() => { voiceStateRef.current = voiceState }, [voiceState])
+
+  // Epic 5: Track form abandonment for PostHog
+  useEffect(() => {
+    return () => {
+      if (store.mode !== 'success') {
+        try {
+          if (typeof window !== 'undefined' && (window as any).posthog) {
+            (window as any).posthog.capture('form_abandoned', {
+              form_id: form.id,
+              completed_fields: Object.keys(store.answers).length,
+              total_fields: fields.length,
+            })
+          }
+        } catch (e) { /* analytics must never crash the app */ }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Replace the custom ConnectionLostToast component with sonner.
+  // Watch connectionLost flag and fire a toast — no inline JSX needed.
+  useEffect(() => {
+    if (store.connectionLost) {
+      toast.error('AI is taking a nap.', {
+        description: 'Retrying... or switch to text mode.',
+        duration: 6000,
+        action: {
+          label: 'Switch to text',
+          onClick: () => { store.setConnectionLost(false); store.setMode('text') },
+        },
+      })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.connectionLost])
+
   useEffect(() => {
     if (store.mode === 'text' && messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' })
@@ -135,7 +177,9 @@ export default function FormSession({
   // making the AI active and hiding the latency of Gemini and STT.
   const fillerAudioRef = useRef<string[]>([])
   useEffect(() => {
-    const fetchFillers = async () => {
+    // Defer by 2s so it doesn't compete with critical first-render requests
+    // and doesn't burn rate-limit budget before the user even starts
+    const timer = setTimeout(async () => {
       try {
         const fillers = ["Hmm... okay", "Accha, ek second...", "Waitt let me note that down...", "Got it, ek second..."]
         const results = await Promise.all(fillers.map(f =>
@@ -147,8 +191,8 @@ export default function FormSession({
         ))
         fillerAudioRef.current = results.map(r => r.audioContent).filter(Boolean)
       } catch (e) { }
-    }
-    fetchFillers()
+    }, 2000)
+    return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.id])
 
@@ -340,11 +384,13 @@ export default function FormSession({
 
       // Empty capture — replay last question and re-listen
       if (cleanTranscript.length < 2) {
+        const capturedFieldIndex = store.currentFieldIndex
         const lastAiMessage = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text
         const reprompt = lastAiMessage || "Sorry, didn't quite catch that — could you try again?"
         playSmartAudio(reprompt, () => {
           setVoiceState('idle')
-          startRecording()
+          // P0 fix: respect field type — don't start mic for file upload fields
+          if (shouldAutoListen(capturedFieldIndex)) startRecording()
           isHandlingTranscriptRef.current = false
         })
         return
@@ -385,8 +431,9 @@ export default function FormSession({
         })
       }, undefined, confidence)
 
-      // If handleConverseResponse errored without calling onSuccess, unlock the guard
-      if (isHandlingTranscriptRef.current && voiceState === 'error') {
+      // P0 fix: use voiceStateRef (not voiceState) to read the CURRENT state value,
+      // not the stale closure value captured when this callback was created.
+      if (isHandlingTranscriptRef.current && voiceStateRef.current === 'error') {
         isHandlingTranscriptRef.current = false
       }
     },
@@ -410,6 +457,11 @@ export default function FormSession({
         const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
         tempStream.getTracks().forEach(t => t.stop())
       } catch (err) {
+        // Epic 3: mic denied or not available — graceful degradation with toast
+        toast.error("We couldn't detect your microphone.", {
+          description: 'Switching to text mode instead.',
+          duration: 4000,
+        })
         store.setMode('text')
         handleInitialSequence('text')
         return
@@ -454,6 +506,7 @@ export default function FormSession({
 
   async function handleSubmitForm() {
     setSubmitting(true)
+    setSubmitError(null)
     try {
       const inputMethod = store.history.some(h => h.role === 'user' && h.text.includes('[Voice]'))
         ? 'voice' : 'text'
@@ -472,9 +525,9 @@ export default function FormSession({
       await submitResponse(formData)
       playChime()
       store.setMode('success')
-    } catch (e) {
+    } catch (e: any) {
       console.error(e)
-      alert('Failed to submit')
+      setSubmitError(e?.message || 'Something went wrong. Please try again.')
     } finally {
       setSubmitting(false)
     }
@@ -501,33 +554,13 @@ export default function FormSession({
     </div>
   )
 
-  // --- CONNECTION LOST TOAST ---
-  const ConnectionLostToast = () => (
-    <AnimatePresence>
-      {store.connectionLost && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 20 }}
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 bg-foreground text-background px-5 py-3 rounded-full flex items-center gap-3 shadow-xl text-sm font-medium z-50"
-        >
-          <WifiOff className="h-4 w-4 text-red-400 shrink-0" />
-          AI is taking a nap. Retrying or switch to text mode.
-          <button
-            onClick={() => { store.setConnectionLost(false); store.setMode('text') }}
-            className="ml-1 text-accent-amber underline"
-          >
-            Switch
-          </button>
-        </motion.div>
-      )}
-    </AnimatePresence>
-  )
+  // ConnectionLostToast replaced by sonner useEffect above — no inline component needed
 
   // ==================== RENDERS ====================
 
   if (store.mode === 'choice') {
     return (
       <main className="min-h-[100dvh] flex flex-col items-center justify-center p-6 bg-background">
-        <ConnectionLostToast />
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-2xl w-full text-center space-y-12">
           <div>
             <h1 className="text-4xl sm:text-5xl font-serif font-medium tracking-tight mb-4">{form.title}</h1>
@@ -535,9 +568,8 @@ export default function FormSession({
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto">
             <button
+              aria-label="Start voice mode"
               onClick={() => {
-                // Step 2: Create Audio element NOW, synchronously on this user gesture.
-                // This is the critical fix for iOS autoplay policy.
                 if (!audioRef.current) {
                   audioRef.current = new Audio()
                   audioRef.current.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
@@ -553,6 +585,7 @@ export default function FormSession({
               <span className="text-lg">Talk with me</span>
             </button>
             <button
+              aria-label="Start text mode"
               onClick={() => {
                 store.setMode('text')
                 handleInitialSequence('text')
@@ -571,6 +604,8 @@ export default function FormSession({
   if (store.mode === 'voice') {
     const lastAiText = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text ?? ''
     const isThinking = voiceState === 'thinking' || voiceState === 'transcribing'
+    const totalFields = fields.length
+    const currentQuestionNum = Math.min(store.currentFieldIndex + 1, totalFields)
 
     const orbColour = voiceState === 'speaking'
       ? 'bg-accent-amber shadow-[0_0_60px_rgba(245,158,11,0.25)]'
@@ -581,8 +616,20 @@ export default function FormSession({
           : 'bg-foreground/15'
 
     return (
-      <main className="min-h-[100dvh] flex flex-col items-center justify-between p-6 pt-safe pb-safe bg-background overflow-hidden">
-        <ConnectionLostToast />
+      <main className="min-h-[100dvh] flex flex-col items-center justify-between p-6 pt-safe pb-safe bg-background overflow-hidden" role="main" aria-label={`Voice form: ${form.title}`}>
+        {/* Progress indicator */}
+        <div className="w-full max-w-sm pt-4">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs text-foreground/40 font-medium">Question {currentQuestionNum} of {totalFields}</span>
+            <span className="text-xs text-foreground/30">{Math.round((currentQuestionNum / totalFields) * 100)}%</span>
+          </div>
+          <div className="h-1 w-full bg-foreground/10 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-accent-amber rounded-full transition-all duration-700"
+              style={{ width: `${(currentQuestionNum / totalFields) * 100}%` }}
+            />
+          </div>
+        </div>
 
         {/* Ambient background glow */}
         <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] rounded-full blur-[120px] -z-10 transition-colors duration-1000 ${voiceState === 'speaking' ? 'bg-accent-amber/8'
@@ -633,7 +680,16 @@ export default function FormSession({
             )}
 
             <motion.button
-              onClick={() => { if (voiceState === 'listening') stopRecording() }}
+              aria-label={voiceState === 'listening' ? 'Stop recording' : voiceState === 'error' ? 'Tap to retry recording' : 'Voice input orb'}
+              onClick={() => {
+                if (voiceState === 'listening') stopRecording()
+                // P2: retry button — tap orb when in error state to try again
+                if (voiceState === 'error') {
+                  isHandlingTranscriptRef.current = false
+                  setVoiceState('idle')
+                  startRecording()
+                }
+              }}
               className={`relative z-10 w-[140px] h-[140px] rounded-full flex flex-col items-center justify-center transition-colors duration-500 ${orbColour}`}
               animate={isThinking
                 ? { scale: [0.97, 1, 0.97], opacity: [0.6, 1, 0.6] }
@@ -647,7 +703,12 @@ export default function FormSession({
                   <Square className="h-5 w-5 text-black fill-black mt-2 opacity-70" />
                 </>
               )}
-              {voiceState === 'error' && <WifiOff className="h-8 w-8 text-white" />}
+              {voiceState === 'error' && (
+                <div className="flex flex-col items-center gap-1">
+                  <WifiOff className="h-7 w-7 text-white" />
+                  <span className="text-white text-xs font-medium">Tap retry</span>
+                </div>
+              )}
             </motion.button>
           </div>
 
@@ -777,10 +838,10 @@ export default function FormSession({
           </div>
         )}
 
-        {/* Epic 3: Text Override Input */}
         <div className="w-full max-w-xs mx-auto pb-4 pt-6 z-20">
           <input
             type="text"
+            aria-label="Switch to text input"
             placeholder="Tap to type instead..."
             onFocus={() => {
               isSpeakingRef.current = false
@@ -792,6 +853,17 @@ export default function FormSession({
             }}
             className="w-full bg-foreground/[0.04] border border-foreground/10 text-foreground rounded-full px-6 py-4 focus:outline-none focus:ring-2 focus:ring-accent-amber/50 placeholder:text-foreground/40 transition-all font-sans text-center text-sm shadow-sm hover:bg-foreground/[0.06]"
           />
+          {/* Epic 5: Report Issue link — intentionally ironic, per PRD */}
+          <div className="text-center mt-4">
+            <a
+              href="https://tally.so/r/YOUR_TALLY_FORM_ID"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-xs text-foreground/20 hover:text-foreground/40 transition-colors"
+            >
+              Report an issue
+            </a>
+          </div>
         </div>
       </main>
     )
@@ -799,8 +871,7 @@ export default function FormSession({
 
   if (store.mode === 'text') {
     return (
-      <main className="min-h-[100dvh] flex flex-col bg-background max-w-3xl mx-auto w-full relative">
-        <ConnectionLostToast />
+      <main className="min-h-[100dvh] flex flex-col bg-background max-w-3xl mx-auto w-full relative" role="main" aria-label={`Text form: ${form.title}`}>
         <header className="p-4 sm:p-6 pb-2 border-b border-foreground/5 bg-background/80 backdrop-blur-md sticky top-0 z-10 flex items-center justify-between">
           <h2 className="font-serif font-medium text-foreground tracking-tight truncate pr-4">{form.title}</h2>
           <button onClick={() => store.setMode('review')} className="text-xs text-foreground/40 hover:text-foreground">Skip to review</button>
@@ -834,19 +905,51 @@ export default function FormSession({
         </div>
 
         <div className="p-4 sm:p-6 pb-8 bg-gradient-to-t from-background via-background to-transparent">
+          {/* P0 fix: MCQ chips in text mode — show tap targets when current field is MCQ */}
+          {(() => {
+            const cf = fields[store.currentFieldIndex]
+            if (cf?.field_type === 'mcq' && cf.options?.length > 0) {
+              return (
+                <div className="flex flex-wrap gap-2 mb-3">
+                  {cf.options.map((opt: string) => (
+                    <button
+                      key={opt}
+                      disabled={store.isAiTyping}
+                      onClick={() => {
+                        if (store.isAiTyping) return
+                        const userMsg = opt
+                        store.addMessage({ id: Date.now().toString(), role: 'user', text: userMsg })
+                        store.addMessage({ id: '__ai_thinking__', role: 'ai', text: 'Got it...' })
+                        const fieldIndex = store.currentFieldIndex
+                        handleConverseResponse(userMsg, fieldIndex, 'text', (_, isComplete) => {
+                          if (isComplete) setTimeout(() => store.setMode('review'), 2000)
+                        })
+                      }}
+                      className="px-5 py-2 rounded-full bg-foreground/[0.04] hover:bg-foreground/[0.08] active:scale-95 border border-foreground/10 text-foreground font-medium transition-all text-sm disabled:opacity-40"
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              )
+            }
+            return null
+          })()}
           <form onSubmit={handleSendText} className="relative flex items-center">
             <input
               type="text"
+              aria-label="Your response"
               autoFocus
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
               onFocus={() => typewriterRef.current?.finish()}
               disabled={store.isAiTyping}
-              placeholder="Type your response..."
+              placeholder={fields[store.currentFieldIndex]?.field_type === 'mcq' ? 'Or type your choice...' : 'Type your response...'}
               className="w-full bg-foreground/[0.03] border border-foreground/10 text-foreground rounded-full pl-6 pr-14 py-4 focus:outline-none focus:ring-2 focus:ring-accent-amber/50 placeholder:text-foreground/30 disabled:opacity-50 transition-all font-sans"
             />
             <button
               type="submit"
+              aria-label="Send message"
               disabled={!inputText.trim() || store.isAiTyping}
               className="absolute right-2 p-2 bg-foreground text-background rounded-full hover:scale-105 disabled:opacity-30 disabled:hover:scale-100 transition-all"
             >
@@ -934,6 +1037,12 @@ export default function FormSession({
         </motion.div>
 
         <div className="pt-6 pb-6 sticky bottom-0 bg-background/90 backdrop-blur-md shadow-[0_-20px_30px_rgba(0,0,0,0.05)]">
+          {submitError && (
+            <div className="mb-3 flex items-center gap-2 text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-2xl px-4 py-3">
+              <WifiOff className="h-4 w-4 shrink-0" />
+              <span>{submitError}</span>
+            </div>
+          )}
           <button
             onClick={handleSubmitForm}
             disabled={submitting}

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Mic, Keyboard, PlayCircle, PauseCircle, Loader2 } from 'lucide-react'
 
@@ -83,6 +83,14 @@ function MinimalAudioPlayer({ url }: { url: string }) {
 export default function ResponsesTable({ formId, fields, initialResponses, initialAnswers }: Props) {
   const [responses, setResponses] = useState<Response[]>(initialResponses)
   const [answers, setAnswers] = useState<Answer[]>(initialAnswers)
+
+  // O(1) lookup map: "responseId::fieldId" -> Answer
+  // Prevents O(n×m) nested loops on every render when responses + fields are large
+  const answerMap = useMemo(() => {
+    const m = new Map<string, Answer>()
+    answers.forEach(a => m.set(`${a.response_id}::${a.field_id}`, a))
+    return m
+  }, [answers])
 
   useEffect(() => {
     const supabase = createClient()
@@ -212,7 +220,7 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
                   )}
                 </td>
                 {fields.map(field => {
-                  const ans = answers.find(a => a.response_id === response.id && a.field_id === field.id)
+                  const ans = answerMap.get(`${response.id}::${field.id}`)
                   return (
                     <td key={field.id} className="px-6 py-4 max-w-[200px]">
                     {ans ? (() => {

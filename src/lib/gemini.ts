@@ -1,13 +1,28 @@
-/**
- * Resilient Gemini caller with exponential backoff + Groq Llama fallback.
- * Retries up to 3 times on 429/503, then falls back to Groq if available.
- */
-
 import { GoogleGenerativeAI } from '@google/generative-ai'
 import Groq from 'groq-sdk'
 
 const RETRYABLE = [429, 503]
 const DELAYS = [1000, 2000, 4000]
+
+// Module-level client caches keyed by API key.
+// Reusing instances preserves HTTP connection keep-alive and avoids
+// the overhead of building a new connection pool on every request.
+const geminiClients = new Map<string, GoogleGenerativeAI>()
+const groqClients = new Map<string, Groq>()
+
+function getGeminiClient(apiKey: string): GoogleGenerativeAI {
+  if (!geminiClients.has(apiKey)) {
+    geminiClients.set(apiKey, new GoogleGenerativeAI(apiKey))
+  }
+  return geminiClients.get(apiKey)!
+}
+
+function getGroqClient(apiKey: string): Groq {
+  if (!groqClients.has(apiKey)) {
+    groqClients.set(apiKey, new Groq({ apiKey }))
+  }
+  return groqClients.get(apiKey)!
+}
 
 export async function callGeminiWithRetry(
   geminiKey: string,
@@ -16,7 +31,7 @@ export async function callGeminiWithRetry(
   systemInstruction: string,
   userPrompt: string,
 ): Promise<string> {
-  const genAI = new GoogleGenerativeAI(geminiKey)
+  const genAI = getGeminiClient(geminiKey)
   const geminiModel = genAI.getGenerativeModel({ model, systemInstruction })
 
   for (let attempt = 0; attempt <= 2; attempt++) {
@@ -49,7 +64,7 @@ export async function callGeminiWithRetry(
 }
 
 async function callGroqFallback(groqKey: string, systemInstruction: string, userPrompt: string): Promise<string> {
-  const groq = new Groq({ apiKey: groqKey })
+  const groq = getGroqClient(groqKey)
   const completion = await groq.chat.completions.create({
     model: 'llama-3.1-8b-instant',
     messages: [

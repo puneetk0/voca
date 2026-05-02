@@ -9,7 +9,7 @@ export default async function AdminDashboard() {
   // Fetch forms
   const { data: forms, error } = await supabase
     .from('forms')
-    .select('id, title, created_at, is_active')
+    .select('id, title, created_at, is_active, responses(count)')
     .eq('user_id', user?.id)
     .order('created_at', { ascending: false })
 
@@ -71,9 +71,14 @@ export default async function AdminDashboard() {
                 <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${form.is_active ? 'bg-accent-sage/10 text-accent-sage ring-accent-sage/20' : 'bg-foreground/10 text-foreground/70 ring-foreground/20'}`}>
                   {form.is_active ? 'Active' : 'Draft'}
                 </span>
-                <span className="text-accent-amber text-sm font-medium opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-                  View <span aria-hidden="true">&rarr;</span>
-                </span>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs text-foreground/40 font-medium">
+                    {(form as any).responses?.[0]?.count ?? 0} response{((form as any).responses?.[0]?.count ?? 0) !== 1 ? 's' : ''}
+                  </span>
+                  <span className="text-accent-amber text-sm font-medium opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
+                    View <span aria-hidden="true">&rarr;</span>
+                  </span>
+                </div>
               </div>
             </Link>
           ))}
