@@ -6,7 +6,7 @@ export type Message = {
   text: string
 }
 
-export type InputMode = 'choice' | 'text' | 'voice' | 'review' | 'success'
+export type InputMode = 'choice' | 'voice' | 'review' | 'success'
 
 interface ConversationState {
   formId: string | null

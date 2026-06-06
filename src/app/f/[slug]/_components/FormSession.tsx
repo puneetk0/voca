@@ -3,15 +3,15 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useConversationStore } from '@/lib/store/conversation'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Mic, Keyboard, Send, Square, WifiOff, CheckCircle2 } from 'lucide-react'
+import { Mic, Send, Square, WifiOff, CheckCircle2 } from 'lucide-react'
 import { submitResponse } from '@/lib/actions/submit'
 import { useVoiceRecorder } from '@/lib/hooks/useVoiceRecorder'
 import { useTTS, type VoiceState } from '@/lib/hooks/useTTS'
-import Typewriter, { TypewriterHandle } from '@/components/chat/Typewriter'
 import { createClient } from '@/lib/supabase/client'
 import { toast } from 'sonner'
 import ReviewScreen from './ReviewScreen'
 import SuccessScreen from './SuccessScreen'
+import Waveform from '@/components/voice/Waveform'
 
 const GHOST_MESSAGES = [
   "Taking a moment — bear with me.",
@@ -60,11 +60,12 @@ export default function FormSession({
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false)
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
+  const [selectedLang, setSelectedLang] = useState<'hi' | 'en'>('hi')
+  const [showTextHint, setShowTextHint] = useState(false)
+  const textInputRef = useRef<HTMLInputElement>(null)
   // Ref that mirrors voiceState — allows reading current value inside async closures
   // without stale-closure bugs (React state is always the captured render value)
   const voiceStateRef = useRef<VoiceState>('idle')
-  const messagesEndRef = useRef<HTMLDivElement>(null)
-  const typewriterRef = useRef<TypewriterHandle>(null)
 
   // Tracks the most recently confirmed answer to show between questions
   const [lastConfirmedAnswer, setLastConfirmedAnswer] = useState<{ label: string; value: string } | null>(null)
@@ -80,7 +81,7 @@ export default function FormSession({
   // isHandlingTranscriptRef: true while a converse call is in-flight, blocks duplicate VAD fires
   const isHandlingTranscriptRef = useRef(false)
 
-  const { audioRef, fillerAudioRef, fillerFormatRef, languageRef, isSpeakingRef, playSmartAudio, killAudio, playChime } = useTTS(form.id, setVoiceState)
+  const { audioRef, fillerAudioRef, fillerFormatRef, languageRef, isSpeakingRef, playSmartAudio, killAudio, playChime, switchToEnglishFillers } = useTTS(form.id, setVoiceState)
 
 
   const ANSWERS_KEY = `voca_answers_${form.id}`
@@ -94,6 +95,11 @@ export default function FormSession({
       const fieldId = fieldsByLabel[key.toLowerCase().trim()]
       if (fieldId) store.setAnswer(fieldId, value)
     })
+    // Auto-fill signed-in user's email into any email-type field
+    if (userEmail) {
+      const emailField = fields.find(f => f.field_type === 'email')
+      if (emailField) store.setAnswer(emailField.id, userEmail)
+    }
     // Restore in-progress answers from localStorage
     try {
       const saved = localStorage.getItem(ANSWERS_KEY)
@@ -141,35 +147,27 @@ export default function FormSession({
   }, [])
 
   // Replace the custom ConnectionLostToast component with sonner.
-  // Watch connectionLost flag and fire a toast — no inline JSX needed.
   useEffect(() => {
     if (store.connectionLost) {
       toast.error('AI is taking a nap.', {
-        description: 'Retrying... or switch to text mode.',
+        description: 'Retrying... or type your answer below.',
         duration: 6000,
-        action: {
-          label: 'Switch to text',
-          onClick: () => { store.setConnectionLost(false); store.setMode('text') },
-        },
       })
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.connectionLost])
 
+  // Amber glow on text input when voice struggles — auto-clears after 4s and focuses input
   useEffect(() => {
-    if (store.mode === 'text' && messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [store.history, store.isAiTyping, store.mode])
+    if (!showTextHint) return
+    textInputRef.current?.focus()
+    const timer = setTimeout(() => setShowTextHint(false), 4000)
+    return () => clearTimeout(timer)
+  }, [showTextHint])
 
   // Optimistic thinking label shown while Gemini processes
-  function getThinkingLabel(fieldType: string, transcript: string) {
-    if (store.mode === 'voice') return 'Extracting your answer...'
-    const short = transcript.slice(0, 40)
-    if (fieldType === 'email') return `Extracting your email.`
-    if (fieldType === 'number') return `Noting your number.`
-    if (fieldType === 'phone') return `Reading phone number.`
-    return `Got that — processing "${short}"...`
+  function getThinkingLabel(_fieldType: string, _transcript: string) {
+    return 'Extracting your answer...'
   }
 
   // --- CORE CONVERSE HANDLER ---
@@ -217,8 +215,10 @@ export default function FormSession({
       } else {
         store.setConnectionLost(true)
         store.setIsAiTyping(false)
+        isHandlingTranscriptRef.current = false
         if (mode === 'voice') {
           setVoiceState('error')
+          setShowTextHint(true)
           isSpeakingRef.current = false
         }
         return
@@ -228,6 +228,7 @@ export default function FormSession({
     if (result.error || !result.data) {
       store.setConnectionLost(true)
       store.setIsAiTyping(false)
+      isHandlingTranscriptRef.current = false
       if (mode === 'voice') {
         setVoiceState('error')
         isSpeakingRef.current = false
@@ -242,7 +243,7 @@ export default function FormSession({
     // and clear Hindi fillers so we don't play Hindi audio before an English response
     if (data.language === 'en' && languageRef.current === 'hi') {
       languageRef.current = 'en'
-      fillerAudioRef.current = []
+      switchToEnglishFillers()
     }
 
     if (data.extractedValues && typeof data.extractedValues === 'object') {
@@ -302,14 +303,14 @@ export default function FormSession({
 
       const cleanTranscript = transcript.trim()
 
-      // Empty capture — replay last question and re-listen
+      // Empty capture — replay last question, re-listen, and hint toward text input
       if (cleanTranscript.length < 2) {
         const capturedFieldIndex = store.currentFieldIndex
         const lastAiMessage = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text
         const reprompt = lastAiMessage || "Sorry, didn't quite catch that — could you try again?"
+        setShowTextHint(true)
         playSmartAudio(reprompt, () => {
           setVoiceState('idle')
-          // P0 fix: respect field type — don't start mic for file upload fields
           if (shouldAutoListen(capturedFieldIndex)) startRecording()
           isHandlingTranscriptRef.current = false
         })
@@ -346,8 +347,11 @@ export default function FormSession({
         playSmartAudio(aiMessage, () => {
           isHandlingTranscriptRef.current = false
           setVoiceState('idle')
-          if (!isComplete) startRecording()
-          else store.setMode('review')
+          if (!isComplete) {
+            if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
+          } else {
+            store.setMode('review')
+          }
         })
       }, undefined, confidence)
 
@@ -371,23 +375,19 @@ export default function FormSession({
     return fields[fieldIndex]?.field_type !== 'file'
   }
 
-  async function handleInitialSequence(mode: 'text' | 'voice') {
-    if (mode === 'voice') {
-      try {
-        const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        tempStream.getTracks().forEach(t => t.stop())
-      } catch (err) {
-        // Epic 3: mic denied or not available — graceful degradation with toast
-        toast.error("We couldn't detect your microphone.", {
-          description: 'Switching to text mode instead.',
-          duration: 4000,
-        })
-        store.setMode('text')
-        handleInitialSequence('text')
-        return
-      }
-      setVoiceState('thinking')
+  async function handleInitialSequence() {
+    try {
+      const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      tempStream.getTracks().forEach(t => t.stop())
+    } catch {
+      toast.error("Microphone unavailable.", {
+        description: "No worries — type your answers below.",
+        duration: 4000,
+      })
+      setShowTextHint(true)
+      // Continue in voice mode — TTS still plays, user types their answers
     }
+    setVoiceState('thinking')
 
     const prefillEntries = Object.entries(prefills)
     const prefillNote = prefillEntries.length > 0
@@ -396,31 +396,38 @@ export default function FormSession({
 
     store.addMessage({ id: '__ai_thinking__', role: 'ai', text: 'Setting things up...' })
 
-    await handleConverseResponse('Hello', 0, mode, (aiMessage) => {
-      if (mode === 'voice') {
-        playSmartAudio(aiMessage, () => {
-          setVoiceState('idle')
-          if (shouldAutoListen(store.currentFieldIndex)) startRecording()
-        })
-      }
+    const startFieldIndex = Math.max(0, fields.findIndex(f => !store.answers[f.id]))
+
+    await handleConverseResponse('Hello', startFieldIndex, 'voice', (aiMessage) => {
+      playSmartAudio(aiMessage, () => {
+        setVoiceState('idle')
+        if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
+      })
     }, prefillNote)
   }
 
-  // --- TEXT HANDLER ---
-  async function handleSendText(e: React.FormEvent) {
+  // --- INLINE TEXT HANDLER (unified — feeds same TTS+mic loop as voice) ---
+  async function handleSendVoiceText(e: React.FormEvent) {
     e.preventDefault()
-    if (!inputText.trim() || store.isAiTyping) return
     const userMsg = inputText.trim()
+    if (!userMsg || isHandlingTranscriptRef.current) return
     setInputText('')
+    killAudio()
+    stopRecording(true)
+    isHandlingTranscriptRef.current = true
     store.addMessage({ id: Date.now().toString(), role: 'user', text: userMsg })
-    store.addMessage({
-      id: '__ai_thinking__',
-      role: 'ai',
-      text: getThinkingLabel(fields[store.currentFieldIndex]?.field_type || 'text', userMsg)
-    })
-    const fieldIndex = store.currentFieldIndex
-    await handleConverseResponse(userMsg, fieldIndex, 'text', (_, isComplete) => {
-      if (isComplete) setTimeout(() => store.setMode('review'), 2000)
+    store.addMessage({ id: '__ai_thinking__', role: 'ai', text: getThinkingLabel(fields[store.currentFieldIndex]?.field_type || 'text', userMsg) })
+    setVoiceState('thinking')
+    await handleConverseResponse(userMsg, store.currentFieldIndex, 'voice', (aiMessage, isComplete) => {
+      playSmartAudio(aiMessage, () => {
+        isHandlingTranscriptRef.current = false
+        setVoiceState('idle')
+        if (!isComplete) {
+          if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
+        } else {
+          store.setMode('review')
+        }
+      })
     })
   }
 
@@ -482,12 +489,31 @@ export default function FormSession({
   if (store.mode === 'choice') {
     return (
       <main className="min-h-[100dvh] flex flex-col items-center justify-center p-6 bg-background">
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-2xl w-full text-center space-y-12">
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-2xl w-full text-center space-y-10">
           <div>
             <h1 className="text-4xl sm:text-5xl font-serif font-medium tracking-tight mb-4">{form.title}</h1>
             <p className="text-xl text-foreground/60 max-w-lg mx-auto">{form.description}</p>
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-w-lg mx-auto">
+
+          {/* Language toggle */}
+          <div className="flex items-center justify-center gap-2">
+            <span className="text-xs text-foreground/40 font-sans mr-1">Language</span>
+            {(['hi', 'en'] as const).map(lang => (
+              <button
+                key={lang}
+                onClick={() => { setSelectedLang(lang); languageRef.current = lang }}
+                className={`px-4 py-1.5 rounded-full text-sm font-sans transition-all ${
+                  selectedLang === lang
+                    ? 'bg-foreground text-background shadow-sm'
+                    : 'bg-foreground/[0.05] text-foreground/50 hover:bg-foreground/[0.08] border border-foreground/10'
+                }`}
+              >
+                {lang === 'hi' ? 'हिंदी' : 'English'}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-col items-center gap-3 max-w-xs mx-auto w-full">
             <button
               aria-label="Start voice mode"
               onClick={() => {
@@ -498,24 +524,14 @@ export default function FormSession({
                   audioRef.current.src = ''
                 }
                 store.setMode('voice')
-                handleInitialSequence('voice')
+                handleInitialSequence()
               }}
-              className="group flex flex-col items-center justify-center gap-4 p-8 rounded-3xl bg-accent-amber/10 text-accent-amber hover:bg-accent-amber/20 border border-accent-amber/20 transition-all font-medium h-[200px]"
+              className="group w-full flex flex-col items-center justify-center gap-4 p-8 rounded-3xl bg-accent-amber/10 text-accent-amber hover:bg-accent-amber/20 border border-accent-amber/20 transition-all font-medium h-[180px]"
             >
               <Mic className="h-10 w-10 group-hover:scale-110 transition-transform" />
               <span className="text-lg">Talk with me</span>
             </button>
-            <button
-              aria-label="Start text mode"
-              onClick={() => {
-                store.setMode('text')
-                handleInitialSequence('text')
-              }}
-              className="group flex flex-col items-center justify-center gap-4 p-8 rounded-3xl bg-foreground/[0.03] text-foreground hover:bg-foreground/[0.05] border border-foreground/10 transition-all font-medium h-[200px]"
-            >
-              <Keyboard className="h-10 w-10 group-hover:scale-110 transition-transform text-foreground/50" />
-              <span className="text-lg">I'll Type</span>
-            </button>
+            <p className="text-xs text-foreground/30 font-sans">Text input always available during the conversation</p>
           </div>
         </motion.div>
       </main>
@@ -635,25 +651,12 @@ export default function FormSession({
               }
               transition={{ repeat: isThinking ? Infinity : 0, duration: 1.4 }}
             >
-              {/* VAD waveform bars — only render when speech detected above noise floor */}
+              {/* Real frequency waveform from mic stream */}
               {voiceState === 'listening' && (
-                <div className="flex items-end gap-[3px] h-8">
-                  {[0.7, 1.0, 0.6, 0.9, 0.5, 0.8, 0.4].map((multiplier, i) => {
-                    const barH = Math.max(4, Math.round(vadVolume * 28 * multiplier))
-                    return (
-                      <motion.span
-                        key={i}
-                        className="w-[3px] rounded-full bg-black/70"
-                        animate={{ height: barH }}
-                        transition={{ duration: 0.07, ease: 'linear' }}
-                        style={{ minHeight: 4, maxHeight: 28 }}
-                      />
-                    )
-                  })}
-                </div>
+                <Waveform stream={stream} isActive={true} color="rgba(0,0,0,0.65)" />
               )}
               {voiceState === 'listening' && (
-                <Square className="h-4 w-4 text-black/60 fill-black/60 mt-2" />
+                <Square className="h-4 w-4 text-black/60 fill-black/60 mt-1" />
               )}
               {voiceState === 'error' && (
                 <div className="flex flex-col items-center gap-1">
@@ -708,7 +711,7 @@ export default function FormSession({
                     playSmartAudio(aiMessage, () => {
                       isHandlingTranscriptRef.current = false
                       setVoiceState('idle')
-                      const nextIdx = store.currentFieldIndex
+                      const nextIdx = useConversationStore.getState().currentFieldIndex
                       if (!isComplete) {
                         if (shouldAutoListen(nextIdx)) startRecording()
                       } else {
@@ -754,7 +757,7 @@ export default function FormSession({
 
                   // Synchronously kill audio + mic
                   killAudio()
-                  stopRecording()
+                  stopRecording(true)
                   setIsUploading(true)
                   setVoiceState('thinking')
 
@@ -770,6 +773,7 @@ export default function FormSession({
                   setIsUploading(false)
 
                   if (error) {
+                    isHandlingTranscriptRef.current = false
                     store.addMessage({ id: Date.now().toString(), role: 'ai', text: `Upload failed: ${error.message}` })
                     setVoiceState('idle')
                     // Don't restart mic for file fields — user needs to upload
@@ -784,6 +788,7 @@ export default function FormSession({
                   store.setAnswer(fields[store.currentFieldIndex].id, publicUrl)
 
                   const nextIdx = store.currentFieldIndex
+                  isHandlingTranscriptRef.current = true
                   await handleConverseResponse(
                     `[System: User uploaded file. Name: ${file.name}, URL: ${publicUrl}]`,
                     nextIdx,
@@ -792,7 +797,7 @@ export default function FormSession({
                       playSmartAudio(aiMessage, () => {
                         isHandlingTranscriptRef.current = false
                         setVoiceState('idle')
-                        const newIdx = store.currentFieldIndex
+                        const newIdx = useConversationStore.getState().currentFieldIndex
                         if (!isComplete) {
                           // Only start mic if next field is NOT a file field
                           if (shouldAutoListen(newIdx)) startRecording()
@@ -808,189 +813,37 @@ export default function FormSession({
           </div>
         )}
 
-        <div className="w-full max-w-xs mx-auto pb-4 pt-6 z-20">
-          <input
-            type="text"
-            aria-label="Switch to text input"
-            placeholder="Tap to type instead..."
-            onFocus={() => {
-              isSpeakingRef.current = false
-              window.speechSynthesis.cancel()
-              if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
-              stopRecording()
-              setVoiceState('idle')
-              store.setMode('text')
-            }}
-            className="w-full bg-foreground/[0.04] border border-foreground/10 text-foreground rounded-full px-6 py-4 focus:outline-none focus:ring-2 focus:ring-accent-amber/50 placeholder:text-foreground/40 transition-all font-sans text-center text-sm shadow-sm hover:bg-foreground/[0.06]"
-          />
-          {/* Epic 5: Report Issue link — intentionally ironic, per PRD */}
-          <div className="text-center mt-4">
-            <a
-              href="https://tally.so/r/YOUR_TALLY_FORM_ID"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-xs text-foreground/20 hover:text-foreground/40 transition-colors"
-            >
-              Report an issue
-            </a>
-          </div>
-        </div>
-      </main>
-    )
-  }
-
-  if (store.mode === 'text') {
-    // Fade curve: only last 2 AI messages at full opacity, older ones muted
-    const aiMessageIds = store.history.filter(m => m.role === 'ai').map(m => m.id)
-    const recentAiIds = new Set(aiMessageIds.slice(-2))
-
-    return (
-      <main className="min-h-[100dvh] flex flex-col bg-background max-w-3xl mx-auto w-full relative" role="main" aria-label={`Text form: ${form.title}`}>
-        <header className="p-4 sm:p-6 pb-3 border-b border-foreground/[0.06] bg-background/90 backdrop-blur-md sticky top-0 z-10 flex items-center justify-between">
-          <h2 className="font-serif font-medium text-foreground tracking-tight truncate pr-4">{form.title}</h2>
-          <div className="flex items-center gap-3">
-            {/* Back to voice — symmetric with voice mode's "tap to type" */}
-            <button
-              onClick={() => {
-                store.setMode('voice')
-                setInputText('')
-              }}
-              className="text-xs text-foreground/30 hover:text-foreground/60 transition-colors flex items-center gap-1"
-            >
-              <Mic className="h-3 w-3" /> Voice
-            </button>
-            <button onClick={() => store.setMode('review')} className="text-xs text-foreground/40 hover:text-foreground transition-colors">Review</button>
-          </div>
-        </header>
-
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
-          <AnimatePresence initial={false}>
-            {store.history.map((msg, idx) => {
-              const isLastAi = msg.role === 'ai' && !recentAiIds.has(msg.id)
-              const isCurrentAi = msg.role === 'ai' && aiMessageIds[aiMessageIds.length - 1] === msg.id
-              return (
-                <motion.div
-                  key={msg.id}
-                  layout
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{
-                    opacity: isLastAi ? 0.35 : 1,
-                    y: 0,
-                  }}
-                  transition={{ duration: 0.3 }}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div className={`max-w-[85%] sm:max-w-[75%] ${
-                    msg.role === 'user'
-                      ? 'bg-foreground/[0.06] border border-foreground/[0.08] text-foreground rounded-3xl rounded-tr-md px-5 py-3 text-sm font-sans'
-                      : 'bg-transparent text-foreground py-3'
-                  }`}>
-                    {msg.role === 'ai' && isCurrentAi && !store.isAiTyping ? (
-                      <Typewriter ref={typewriterRef} text={msg.text.replace('[Voice]', '')} speed={30}
-                        className="ai-text text-xl sm:text-2xl leading-snug"
-                      />
-                    ) : msg.role === 'ai' ? (
-                      <p className="ai-text text-xl sm:text-2xl leading-snug">{msg.text.replace('[Voice]', '')}</p>
-                    ) : (
-                      <span>{msg.text.replace('[Voice] ', '').replace('[Selected: ', '').replace(']', '')}</span>
-                    )}
-                  </div>
-                </motion.div>
-              )
-            })}
-            {store.isAiTyping && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start py-2">
-                <ThinkingDots />
-              </motion.div>
-            )}
-          </AnimatePresence>
-          {/* Confirmed answer pill — same as voice mode */}
-          <AnimatePresence>
-            {lastConfirmedAnswer && (
-              <motion.div
-                key={lastConfirmedAnswer.value}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                className="flex justify-end"
-              >
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-accent-sage/10 border border-accent-sage/20">
-                  <CheckCircle2 className="h-3 w-3 text-accent-sage" />
-                  <span className="text-xs text-foreground/50 font-sans">{lastConfirmedAnswer.label}:</span>
-                  <span className="text-xs text-foreground font-mono">{lastConfirmedAnswer.value}</span>
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-          <div ref={messagesEndRef} />
-        </div>
-
-        <div className="p-4 sm:p-6 pb-8 bg-gradient-to-t from-background via-background to-transparent">
-          {/* P0 fix: MCQ chips in text mode — show tap targets when current field is MCQ */}
-          {(() => {
-            const cf = fields[store.currentFieldIndex]
-            if (cf?.field_type === 'mcq' && cf.options?.length > 0) {
-              return (
-                <div className="flex flex-wrap gap-2 mb-3">
-                  {cf.options.map((opt: string) => (
-                    <button
-                      key={opt}
-                      disabled={store.isAiTyping}
-                      onClick={() => {
-                        if (store.isAiTyping) return
-                        const userMsg = opt
-                        store.addMessage({ id: Date.now().toString(), role: 'user', text: userMsg })
-                        store.addMessage({ id: '__ai_thinking__', role: 'ai', text: 'Got it...' })
-                        const fieldIndex = store.currentFieldIndex
-                        handleConverseResponse(userMsg, fieldIndex, 'text', (_, isComplete) => {
-                          if (isComplete) setTimeout(() => store.setMode('review'), 2000)
-                        })
-                      }}
-                      className="px-5 py-2 rounded-full bg-foreground/[0.04] hover:bg-foreground/[0.08] active:scale-95 border border-foreground/10 text-foreground font-medium transition-all text-sm disabled:opacity-40"
-                    >
-                      {opt}
-                    </button>
-                  ))}
-                </div>
-              )
-            }
-            return null
-          })()}
-          <form onSubmit={handleSendText} className="relative flex items-center gap-2">
+        <form onSubmit={handleSendVoiceText} className="w-full max-w-xs mx-auto pb-4 pt-6 z-20">
+          <div className={`flex items-center gap-1 rounded-full px-5 transition-all duration-300 border ${
+            showTextHint
+              ? 'border-accent-amber/50 bg-accent-amber/5 ring-2 ring-accent-amber/20'
+              : 'border-foreground/10 bg-foreground/[0.04]'
+          }`}>
             <input
+              ref={textInputRef}
               type="text"
-              aria-label="Your response"
-              autoFocus
+              aria-label="Type your answer"
               value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              onFocus={() => typewriterRef.current?.finish()}
-              disabled={store.isAiTyping}
-              placeholder={fields[store.currentFieldIndex]?.field_type === 'mcq' ? 'Or type your choice...' : 'Type your response...'}
-              className="flex-1 bg-foreground/[0.04] border border-foreground/[0.08] text-foreground rounded-full pl-5 pr-14 py-4 focus:outline-none focus:ring-2 focus:ring-accent-amber/40 placeholder:text-foreground/25 disabled:opacity-50 transition-all font-sans text-sm"
+              onChange={e => setInputText(e.target.value)}
+              placeholder={showTextHint ? "Couldn't catch that — type instead" : "Or type here..."}
+              className="flex-1 bg-transparent py-4 focus:outline-none text-foreground text-sm font-sans text-center placeholder:text-foreground/40 transition-colors"
             />
-            <button
-              type="submit"
-              aria-label="Send message"
-              disabled={!inputText.trim() || store.isAiTyping}
-              className="absolute right-12 p-2.5 bg-foreground text-background rounded-full hover:scale-105 disabled:opacity-20 disabled:hover:scale-100 transition-all"
-            >
-              <Send className="h-4 w-4" />
-            </button>
-            {/* Mic icon — tap to return to voice mode */}
-            <button
-              type="button"
-              aria-label="Switch to voice mode"
-              onClick={() => {
-                store.setMode('voice')
-                setInputText('')
-              }}
-              className="shrink-0 p-3 rounded-full border border-foreground/[0.08] bg-foreground/[0.03] text-foreground/40 hover:text-foreground/70 hover:border-foreground/20 transition-all"
-            >
-              <Mic className="h-4 w-4" />
-            </button>
-          </form>
-        </div>
+            <AnimatePresence>
+              {inputText.trim() && (
+                <motion.button
+                  type="submit"
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  transition={{ duration: 0.15 }}
+                  className="shrink-0 p-1.5 rounded-full text-foreground/50 hover:text-foreground/80 transition-colors"
+                >
+                  <Send className="h-4 w-4" />
+                </motion.button>
+              )}
+            </AnimatePresence>
+          </div>
+        </form>
       </main>
     )
   }

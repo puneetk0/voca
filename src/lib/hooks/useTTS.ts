@@ -4,32 +4,48 @@ import { useRef, useCallback, useEffect } from 'react'
 
 export type VoiceState = 'idle' | 'thinking' | 'speaking' | 'listening' | 'transcribing' | 'error'
 
-const HINDI_FILLERS = ["हाँ, एक पल...", "नोट कर रहा हूँ...", "समझ गया...", "ज़रूर, बताइए..."]
+const HINDI_FILLERS = ["हाँ...", "अच्छा...", "हम्म...", "ठीक है..."]
+const ENGLISH_FILLERS = ["Hmm...", "Okay...", "Right...", "Got it..."]
 
 export function useTTS(formId: string, setVoiceState: (s: VoiceState) => void) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const fillerAudioRef = useRef<string[]>([])
   const fillerFormatRef = useRef<string>('mpeg')
+  const englishFillerCacheRef = useRef<string[]>([])
   const languageRef = useRef<'hi' | 'en'>('hi')
   const isSpeakingRef = useRef(false)
 
   useEffect(() => {
     const timer = setTimeout(async () => {
       try {
-        const results = await Promise.all(HINDI_FILLERS.map(f =>
-          fetch('/api/tts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ formId, text: f, language: 'hi' }),
-          }).then(r => r.json())
-        ))
-        const first = results.find(r => r.audioContent && r.format)
+        const [hindiResults, englishResults] = await Promise.all([
+          Promise.all(HINDI_FILLERS.map(f =>
+            fetch('/api/tts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ formId, text: f, language: 'hi' }),
+            }).then(r => r.json())
+          )),
+          Promise.all(ENGLISH_FILLERS.map(f =>
+            fetch('/api/tts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ formId, text: f, language: 'en' }),
+            }).then(r => r.json())
+          )),
+        ])
+        const first = hindiResults.find(r => r.audioContent && r.format)
         if (first) fillerFormatRef.current = first.format === 'wav' ? 'wav' : 'mpeg'
-        fillerAudioRef.current = results.map(r => r.audioContent).filter(Boolean)
+        fillerAudioRef.current = hindiResults.map(r => r.audioContent).filter(Boolean)
+        englishFillerCacheRef.current = englishResults.map(r => r.audioContent).filter(Boolean)
       } catch { }
     }, 2000)
     return () => clearTimeout(timer)
   }, [formId])
+
+  const switchToEnglishFillers = useCallback(() => {
+    fillerAudioRef.current = englishFillerCacheRef.current
+  }, [])
 
   const killAudio = useCallback(() => {
     isSpeakingRef.current = false
@@ -84,9 +100,11 @@ export function useTTS(formId: string, setVoiceState: (s: VoiceState) => void) {
       const data = await res.json()
       if (data.fallback || data.error || !data.audioContent) throw new Error('fallback')
 
-      const audio = audioRef.current!
+      if (!audioRef.current) audioRef.current = new Audio()
+      const audio = audioRef.current
       const mimeType = data.format === 'wav' ? 'audio/wav' : 'audio/mpeg'
       audio.src = `data:${mimeType};base64,${data.audioContent}`
+      audio.load()
       audio.onended = handleEnd
       audio.onerror = () => { console.warn('[TTS] fallback to native'); handleEnd() }
       await audio.play().catch(() => { throw new Error('autoplay blocked') })
@@ -105,5 +123,5 @@ export function useTTS(formId: string, setVoiceState: (s: VoiceState) => void) {
     }
   }, [formId, setVoiceState])
 
-  return { audioRef, fillerAudioRef, fillerFormatRef, languageRef, isSpeakingRef, playSmartAudio, killAudio, playChime }
+  return { audioRef, fillerAudioRef, fillerFormatRef, languageRef, isSpeakingRef, playSmartAudio, killAudio, playChime, switchToEnglishFillers }
 }

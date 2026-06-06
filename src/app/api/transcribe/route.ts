@@ -105,29 +105,39 @@ export async function POST(req: Request) {
           'Transcribe this form response. Speaker uses Indian English or Hinglish. Common words: okay, yes, no, actually, basically, na, yaar, theek hai.',
         )
 
-        const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${keys!.groq_key}` },
-          body: groqData as unknown as BodyInit,
-        })
+        const groqKeyList = [
+          keys!.groq_key,
+          process.env.GROQ_KEY_2,
+          process.env.GROQ_KEY_3,
+        ].filter(Boolean) as string[]
 
-        const groqJson = await groqRes.json()
-        
-        if (!groqRes.ok) {
-          console.error('Groq STT error:', groqJson)
-          if (!hasGoogleSTT) throw new Error(groqJson.error?.message || 'Groq transcription failed')
-          console.warn('[STT] Groq failed, falling back to Google...')
-        } else {
-          // Convert log-prob to 0-1 confidence score
+        let sttDone = false
+        for (let ki = 0; ki < groqKeyList.length; ki++) {
+          const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${groqKeyList[ki]}` },
+            body: groqData as unknown as BodyInit,
+          })
+          const groqJson = await groqRes.json()
+
+          if (groqRes.status === 429 && ki < groqKeyList.length - 1) {
+            console.warn(`[STT] Groq key ${ki + 1} rate-limited, trying key ${ki + 2}…`)
+            continue
+          }
+          if (!groqRes.ok) {
+            console.error('Groq STT error:', groqJson)
+            if (!hasGoogleSTT) throw new Error(groqJson.error?.message || 'Groq transcription failed')
+            console.warn('[STT] Groq failed, falling back to Google...')
+            break
+          }
+          // Success
           const groqConfidence = groqJson.segments?.[0]?.avg_logprob
             ? Math.exp(groqJson.segments[0].avg_logprob)
             : 0.9
-
-          return NextResponse.json({
-            transcript: groqJson.text ?? '',
-            confidence: groqConfidence,
-          })
+          sttDone = true
+          return NextResponse.json({ transcript: groqJson.text ?? '', confidence: groqConfidence })
         }
+        if (sttDone) return // satisfied above — TypeScript needs this
       } catch (groqErr: any) {
         if (!hasGoogleSTT) throw groqErr
         console.warn('[STT] Groq exception, falling back to Google:', groqErr.message)

@@ -77,35 +77,48 @@ async function callGroqFallback(groqKey: string, systemInstruction: string, user
   return completion.choices[0]?.message?.content ?? '{}'
 }
 
-// Groq-first strategy: try Llama-3.3-70B (fast, capable) → fall back to Gemini on failure.
-// Used by the converse route where latency matters more than the last 5% of instruction-following.
+// Groq-first strategy: try Llama-3.3-70B across multiple keys (rate-limit rotation),
+// then fall back to Gemini. Keys are tried in order; 429s advance to the next key.
 export async function callFastFirst(
-  groqKey: string,
+  groqKeys: string[],
   geminiKey: string | null,
   systemInstruction: string,
   userPrompt: string,
 ): Promise<string> {
-  if (!groqKey && geminiKey) {
+  const validKeys = groqKeys.filter(Boolean)
+
+  if (validKeys.length === 0 && geminiKey) {
     return callGeminiWithRetry(geminiKey, null, 'gemini-2.5-flash', systemInstruction, userPrompt)
   }
-  try {
-    const groq = getGroqClient(groqKey)
-    const completion = await groq.chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [
-        { role: 'system', content: systemInstruction + '\nRespond ONLY with valid JSON.' },
-        { role: 'user', content: userPrompt },
-      ],
-      response_format: { type: 'json_object' },
-      max_tokens: 600,
-    })
-    console.log('[LLM] Groq primary succeeded')
-    return completion.choices[0]?.message?.content ?? '{}'
-  } catch (err: any) {
-    console.warn('[LLM] Groq primary failed, falling back to Gemini:', err?.message)
-    if (geminiKey) {
-      return callGeminiWithRetry(geminiKey, null, 'gemini-2.5-flash', systemInstruction, userPrompt)
+
+  for (let i = 0; i < validKeys.length; i++) {
+    try {
+      const groq = getGroqClient(validKeys[i])
+      const completion = await groq.chat.completions.create({
+        model: 'llama-3.3-70b-versatile',
+        messages: [
+          { role: 'system', content: systemInstruction + '\nRespond ONLY with valid JSON.' },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: { type: 'json_object' },
+        max_tokens: 600,
+      })
+      if (i > 0) console.log(`[LLM] Groq key ${i + 1} succeeded`)
+      else console.log('[LLM] Groq primary succeeded')
+      return completion.choices[0]?.message?.content ?? '{}'
+    } catch (err: any) {
+      const isRateLimit = err?.status === 429 || err?.message?.includes('rate_limit') || err?.message?.includes('429')
+      if (isRateLimit && i < validKeys.length - 1) {
+        console.warn(`[LLM] Groq key ${i + 1} rate-limited, trying key ${i + 2}…`)
+        continue
+      }
+      console.warn(`[LLM] Groq key ${i + 1} failed (${err?.status ?? err?.message}), falling back to Gemini`)
+      break
     }
-    throw err
   }
+
+  if (geminiKey) {
+    return callGeminiWithRetry(geminiKey, null, 'gemini-2.5-flash', systemInstruction, userPrompt)
+  }
+  throw new Error('All Groq keys exhausted and no Gemini key available')
 }

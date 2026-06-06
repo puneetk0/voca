@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef } from 'react'
 
 interface WaveformProps {
   stream: MediaStream | null
@@ -8,74 +8,65 @@ interface WaveformProps {
   color?: string
 }
 
-export default function Waveform({ stream, isActive, color = '#f59e0b' }: WaveformProps) {
+export default function Waveform({ stream, isActive, color = '#000000' }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const rafRef = useRef<number>(0)
-  const analyserRef = useRef<AnalyserNode | null>(null)
-  const contextRef = useRef<AudioContext | null>(null)
-  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
-  const silenceTimerRef = useRef<number>(0)
-  const [fallbackPulse, setFallbackPulse] = useState(false)
+  const smoothedRef = useRef<Float32Array | null>(null)
 
   useEffect(() => {
-    if (!stream || !isActive) {
-      cancelAnimationFrame(rafRef.current)
-      return
-    }
+    cancelAnimationFrame(rafRef.current)
+    if (!stream || !isActive) return
 
-    const AudioContext = window.AudioContext || (window as any).webkitAudioContext
-    if (!AudioContext) return
+    const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext
+    if (!AudioCtxClass) return
 
-    const ctx = new AudioContext()
+    const ctx = new AudioCtxClass() as AudioContext
     const analyser = ctx.createAnalyser()
-    analyser.fftSize = 64
+    analyser.fftSize = 256          // 128 frequency bins
+    analyser.smoothingTimeConstant = 0.5
     const source = ctx.createMediaStreamSource(stream)
     source.connect(analyser)
 
-    contextRef.current = ctx
-    analyserRef.current = analyser
-    sourceRef.current = source
+    const BAR_COUNT = 28
+    const bufferLength = analyser.frequencyBinCount  // 128
+    const dataArray = new Uint8Array(bufferLength)
+
+    // Voice sits roughly in bins 2–70 of a 128-bin FFT at typical sample rates
+    const startBin = 2
+    const endBin = Math.min(70, bufferLength - 1)
+    const binStep = (endBin - startBin) / BAR_COUNT
+
+    smoothedRef.current = new Float32Array(BAR_COUNT).fill(0)
 
     const canvas = canvasRef.current
     if (!canvas) return
     const cCtx = canvas.getContext('2d')
     if (!cCtx) return
 
-    const bufferLength = analyser.frequencyBinCount
-    const dataArray = new Uint8Array(bufferLength)
-
     const draw = () => {
       rafRef.current = requestAnimationFrame(draw)
       analyser.getByteFrequencyData(dataArray)
-
-      const allSilent = dataArray.every(v => v === 0)
-      if (allSilent) {
-        silenceTimerRef.current++
-        if (silenceTimerRef.current > 180) { // ~3s at 60fps
-          setFallbackPulse(true)
-          return
-        }
-      } else {
-        silenceTimerRef.current = 0
-        setFallbackPulse(false)
-      }
 
       const W = canvas.width
       const H = canvas.height
       cCtx.clearRect(0, 0, W, H)
 
-      const barCount = Math.min(bufferLength, 20)
-      const gap = 4
-      const barWidth = (W - gap * (barCount - 1)) / barCount
+      const gap = 3
+      const barWidth = (W - gap * (BAR_COUNT - 1)) / BAR_COUNT
 
-      for (let i = 0; i < barCount; i++) {
-        const value = dataArray[i] / 255
-        const barH = Math.max(4, value * H)
+      for (let i = 0; i < BAR_COUNT; i++) {
+        const bin = Math.round(startBin + i * binStep)
+        const raw = dataArray[bin] / 255
+
+        // Light smoothing: 70% current value, 30% previous
+        smoothedRef.current![i] = raw * 0.7 + smoothedRef.current![i] * 0.3
+        const value = smoothedRef.current![i]
+
+        const barH = Math.max(3, value * H)
         const x = i * (barWidth + gap)
         const y = (H - barH) / 2
 
-        // Colour fades from accent to dim as amplitude decays
-        const alpha = 0.2 + value * 0.8
+        const alpha = 0.15 + value * 0.85
         cCtx.fillStyle = color
         cCtx.globalAlpha = alpha
         cCtx.beginPath()
@@ -85,43 +76,20 @@ export default function Waveform({ stream, isActive, color = '#f59e0b' }: Wavefo
       cCtx.globalAlpha = 1
     }
 
-    setFallbackPulse(false)
-    silenceTimerRef.current = 0
     draw()
 
     return () => {
       cancelAnimationFrame(rafRef.current)
       source.disconnect()
-      if (ctx.state !== 'closed') {
-        ctx.close().catch(() => {})
-      }
+      if (ctx.state !== 'closed') ctx.close().catch(() => {})
     }
   }, [stream, isActive, color])
-
-  if (fallbackPulse || !stream || !isActive) {
-    return (
-      <div className="flex items-center justify-center gap-1 h-10">
-        {[0, 1, 2, 3, 4].map(i => (
-          <div
-            key={i}
-            className="w-1.5 rounded-full bg-accent-sage/60"
-            style={{
-              height: `${12 + Math.sin(i * 1.2) * 8}px`,
-              animation: `pulse 1.2s ease-in-out infinite`,
-              animationDelay: `${i * 0.15}s`,
-            }}
-          />
-        ))}
-      </div>
-    )
-  }
 
   return (
     <canvas
       ref={canvasRef}
-      width={160}
-      height={60}
-      className="rounded-lg"
+      width={140}
+      height={40}
     />
   )
 }

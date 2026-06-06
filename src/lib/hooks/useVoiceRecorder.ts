@@ -2,11 +2,12 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 
 // --- VAD Constants ---
 const SILENCE_THRESHOLD = 12
-const MAX_SILENCE_MS = 1800
+const MAX_SILENCE_MS = 2400
 const VAD_INTERVAL_MS = 80
 const NOISE_CALIBRATION_MS = 600
 const FLOOR_MULTIPLIER = 1.25
 const FLOOR_MAX = 32
+const MIN_SPEECH_BEFORE_CUTOFF_MS = 700
 
 export function useVoiceRecorder(
   onTranscription: (text: string, audioBlob: Blob, confidence: number) => void,
@@ -23,11 +24,13 @@ export function useVoiceRecorder(
   const mediaRecorder = useRef<MediaRecorder | null>(null)
   const audioChunks = useRef<BlobPart[]>([])
   const micStreamRef = useRef<MediaStream | null>(null)
+  const shouldIgnoreNextStopRef = useRef(false)
 
   // VAD refs
   const vadIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const vadAudioCtxRef = useRef<AudioContext | null>(null)
   const silenceTimerRef = useRef(0)
+  const speechDurationRef = useRef(0)
   const noiseFloorRef = useRef(SILENCE_THRESHOLD)
   const calibrationSamplesRef = useRef<number[]>([])
   const calibrationDoneRef = useRef(false)
@@ -52,9 +55,10 @@ export function useVoiceRecorder(
     }
   }, [])
 
-  const stopRecording = useCallback(() => {
+  const stopRecording = useCallback((ignoreTranscription = false) => {
     clearVAD()
     if (mediaRecorder.current && mediaRecorder.current.state !== 'inactive') {
+      if (ignoreTranscription) shouldIgnoreNextStopRef.current = true
       mediaRecorder.current.stop()
     }
   }, [clearVAD])
@@ -101,10 +105,23 @@ export function useVoiceRecorder(
 
       mediaRecorder.current.onstop = async () => {
         clearVAD()
-        const finalMime = mediaRecorder.current?.mimeType || mimeType || 'audio/webm'
-        const audioBlob = new Blob(audioChunks.current, { type: finalMime })
+        const wasIgnored = shouldIgnoreNextStopRef.current
+        shouldIgnoreNextStopRef.current = false
+
         setIsRecording(false)
         setStream(null)
+
+        if (wasIgnored) {
+          setIsProcessing(false)
+          if (micStreamRef.current) {
+            micStreamRef.current.getTracks().forEach(track => track.stop())
+            micStreamRef.current = null
+          }
+          return
+        }
+
+        const finalMime = mediaRecorder.current?.mimeType || mimeType || 'audio/webm'
+        const audioBlob = new Blob(audioChunks.current, { type: finalMime })
         setIsProcessing(true)
 
         try {
@@ -147,6 +164,7 @@ export function useVoiceRecorder(
 
       // --- VAD Setup ---
       silenceTimerRef.current = 0
+      speechDurationRef.current = 0
       noiseFloorRef.current = SILENCE_THRESHOLD
       calibrationSamplesRef.current = []
       calibrationDoneRef.current = false
@@ -212,14 +230,19 @@ export function useVoiceRecorder(
 
           // Phase 2: Silence detection + expose normalised volume for waveform
           if (currentVol < noiseFloorRef.current) {
-            silenceTimerRef.current += VAD_INTERVAL_MS
             setVadVolume(0) // below noise floor = silence
-            if (silenceTimerRef.current >= MAX_SILENCE_MS) {
-              console.debug('[VAD] Silence detected — stopping')
-              stopRecording()
+            // Only count silence toward cutoff once user has actually spoken for a bit.
+            // This prevents cutting off someone who pauses before starting their answer.
+            if (speechDurationRef.current >= MIN_SPEECH_BEFORE_CUTOFF_MS) {
+              silenceTimerRef.current += VAD_INTERVAL_MS
+              if (silenceTimerRef.current >= MAX_SILENCE_MS) {
+                console.debug('[VAD] Silence detected — stopping')
+                stopRecording()
+              }
             }
           } else {
             silenceTimerRef.current = 0
+            speechDurationRef.current += VAD_INTERVAL_MS
             // Normalize: 0 at noise floor, 1 at 4× floor (typical speech peak)
             const normalised = Math.min((currentVol - noiseFloorRef.current) / (noiseFloorRef.current * 3), 1)
             setVadVolume(normalised)

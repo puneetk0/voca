@@ -26,9 +26,7 @@ FIELD TYPE: Email address
 - Common Indian English patterns: "gmail dot com" → "gmail.com", "yahoo dot in" → "yahoo.in"
 - Only accept if result matches x@y.z format exactly. If invalid, set extractedValue to null.
 - When asking to repeat, be specific: "Could you spell that out slowly? Like, j-o-h-n at gmail dot com?"
-${userEmail ? `- Important: We ALREADY know their registered email is ${userEmail}. When you reach this email field, DO NOT blindly ask "What is your email?". Instead, explicitly ask FIRST: "Do you want to use your current signed up email, which is ${userEmail}, or submit a new one?".
-- If they say "use the same one" or "yes" or just dictate the email identically, you MUST instantly set ${userEmail} as the extractedValue AND immediately transition to the next question in the same breath. Do not get stuck just acknowledging it.
-- If they provide a new email, accept the new one.` : ''}`
+${userEmail ? `- EMAIL AUTO-FILL: The user's registered email "${userEmail}" is already recorded. DO NOT ask for their email. Automatically set extractedValues = {this_field_id: "${userEmail}"} and advance nextFieldIndex past this field. In spokenMessage, confirm it briefly as part of the transition: "Got your email on file — " then immediately ask the next question. Never ask the user to confirm or re-enter it.` : ''}`
 
     case 'number':
       return `
@@ -140,11 +138,20 @@ ${isHindi ? `- Respond in natural, conversational Hindi (Devanagari script) in s
 - displayedMessage MUST always be in English regardless of language.
 
 OPENING HOOK (ONLY on the very first turn — when conversation history is empty):
-${isHindi
-    ? `नमस्ते से शुरू करें और एक warm, friendly sentence में बताएं कि user यहाँ किसलिए है। Template: "नमस्ते! मैं यहाँ आपकी [${formTitle} का purpose 5 शब्दों में] में मदद करने आया हूँ — बस दो मिनट लगेंगे, आप मुझसे बिल्कुल आराम से बात कर सकते हैं। [First question in Hindi]"
-Do NOT use generic openers. Make it feel like a friend is texting them.`
-    : `Open with a warm context-setting sentence. Template: "Hey, I'm here to help you [purpose of ${formTitle} in 5 words] — this'll take about two minutes, you can just talk to me normally. [First question]"
-Do NOT use generic openers like "Hello there" or "Welcome". Make it feel like a friend texted them.`}
+Open with exactly 2 sentences:
+1. A warm, contextual greeting that references what this form is about ("${formTitle}"). Sound like a friend, not a customer service agent.
+2. Immediately ask the first field question.
+Keep it natural. No word limits. Do NOT mention how long it will take. Do NOT ask about language.
+extractedValues must be {} and nextFieldIndex must be 0.
+
+CORRECTION HANDLING (applies throughout the entire conversation):
+If the user's message contains a correction to a PREVIOUS answer — signals like "actually", "wait", "no that's wrong", "I meant", "not X but Y", "that was wrong", "change my [field]", "my [field] should be" — do this:
+1. Identify which previously answered field they're correcting using the conversation history
+2. Extract the corrected value for that field
+3. Include it in extractedValues with the correct field ID (alongside any current-field answer if also given)
+4. Keep nextFieldIndex at the CURRENT field unless the current field is also answered in this turn
+5. In spokenMessage, briefly confirm: "Got it, [corrected value]" and then re-ask the current question if it still needs an answer
+The user can correct any past answer at any time. Never argue. Never second-guess their correction.
 
 EMOTIONAL SIGNAL DETECTION (critical — read between the lines):
 Analyze the TONE of the user's response, not just the content. Then respond accordingly (in the current language):
@@ -280,8 +287,14 @@ export async function POST(req: Request) {
       `User: ${userMessage}`,
     ].filter(Boolean).join('\n')
 
+    const groqKeys = [
+      keys.groq_key,
+      process.env.GROQ_KEY_2,
+      process.env.GROQ_KEY_3,
+    ].filter(Boolean) as string[]
+
     const responseText = await callFastFirst(
-      keys.groq_key ?? '',
+      groqKeys,
       keys.gemini_key ?? null,
       systemInstruction,
       userPrompt,
