@@ -234,12 +234,10 @@ export async function POST(req: Request) {
       .select('gemini_key, groq_key')
       .eq('user_id', form.user_id)
       .single()
-    if (!keys?.groq_key && !keys?.gemini_key) {
-      return NextResponse.json(
-        { error: 'Form owner has not configured API keys' },
-        { status: 400 },
-      )
-    }
+
+    // Fall back to platform env var keys when user hasn't configured their own
+    const effectiveGroqKey = keys?.groq_key || process.env.GROQ_KEY || null
+    const effectiveGeminiKey = keys?.gemini_key || process.env.GEMINI_KEY || null
 
     const fields = fieldsResult.data
     if (!fields || fields.length === 0) {
@@ -288,14 +286,18 @@ export async function POST(req: Request) {
     ].filter(Boolean).join('\n')
 
     const groqKeys = [
-      keys.groq_key,
+      effectiveGroqKey,
       process.env.GROQ_KEY_2,
       process.env.GROQ_KEY_3,
     ].filter(Boolean) as string[]
 
+    if (groqKeys.length === 0 && !effectiveGeminiKey) {
+      return NextResponse.json({ error: 'No AI keys configured for this form.' }, { status: 400 })
+    }
+
     const responseText = await callFastFirst(
       groqKeys,
-      keys.gemini_key ?? null,
+      effectiveGeminiKey,
       systemInstruction,
       userPrompt,
     )

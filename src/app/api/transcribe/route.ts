@@ -75,14 +75,21 @@ export async function POST(req: Request) {
       keys = data
     }
 
-    const hasGoogleSTT = !!keys?.google_tts_key
-    const hasGroq = !!keys?.groq_key
+    // Fall back to platform env var keys when user hasn't configured their own
+    const effectiveGroqKey = keys?.groq_key || process.env.GROQ_KEY || null
+    const effectiveGoogleSTTKey = keys?.google_tts_key || process.env.GOOGLE_TTS_KEY || null
 
-    if (!hasGoogleSTT && !hasGroq) {
-      return NextResponse.json(
-        { error: 'No transcription keys configured. Add a Groq or Google Cloud key in Settings.' },
-        { status: 400 },
-      )
+    const groqKeyList = [
+      effectiveGroqKey,
+      process.env.GROQ_KEY_2,
+      process.env.GROQ_KEY_3,
+    ].filter(Boolean) as string[]
+
+    const hasGroq = groqKeyList.length > 0
+    const hasGoogleSTT = !!effectiveGoogleSTTKey
+
+    if (!hasGroq && !hasGoogleSTT) {
+      return NextResponse.json({ error: 'No transcription keys configured.' }, { status: 400 })
     }
 
     // --- GROQ WHISPER PATH (PRIMARY) ---
@@ -105,11 +112,7 @@ export async function POST(req: Request) {
           'Transcribe this form response. Speaker uses Indian English or Hinglish. Common words: okay, yes, no, actually, basically, na, yaar, theek hai.',
         )
 
-        const groqKeyList = [
-          keys!.groq_key,
-          process.env.GROQ_KEY_2,
-          process.env.GROQ_KEY_3,
-        ].filter(Boolean) as string[]
+        // groqKeyList is built above the gate check
 
         let sttDone = false
         for (let ki = 0; ki < groqKeyList.length; ki++) {
@@ -151,7 +154,7 @@ export async function POST(req: Request) {
         const audioBase64 = Buffer.from(arrayBuffer).toString('base64')
         const encoding = getMimeEncoding(clientMimeType || (file as File).type || '')
 
-        const sttUrl = `https://speech.googleapis.com/v1p1beta1/speech:recognize?key=${keys!.google_tts_key}`
+        const sttUrl = `https://speech.googleapis.com/v1p1beta1/speech:recognize?key=${effectiveGoogleSTTKey}`
 
         const googleRes = await fetch(sttUrl, {
           method: 'POST',

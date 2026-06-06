@@ -130,7 +130,7 @@ export default function CreateFormPage() {
       {step === 'prompt' && (
         <div className="space-y-8 animate-in fade-in zoom-in-95 duration-300">
           <div>
-            <h1 className="text-4xl font-serif font-medium tracking-tight">Create a Natural Form</h1>
+            <h1 className="text-3xl font-semibold tracking-tight">Create a Natural Form</h1>
             <p className="mt-3 text-lg text-foreground/70 font-light">
               Describe what you want to collect. Our AI will design the form for you.
             </p>
@@ -268,21 +268,21 @@ export default function CreateFormPage() {
       {step === 'generating' && (
         <div className="py-24 flex flex-col items-center justify-center text-accent-amber animate-in fade-in duration-500">
           <Loader2 className="h-10 w-10 animate-spin mb-4" />
-          <p className="font-serif text-xl animate-pulse text-foreground">Thinking and designing schema...</p>
+          <p className="text-base animate-pulse text-foreground">Thinking and designing schema...</p>
         </div>
       )}
 
       {step === 'saving' && (
         <div className="py-24 flex flex-col items-center justify-center text-accent-sage animate-in fade-in duration-500">
           <Loader2 className="h-10 w-10 animate-spin mb-4" />
-          <p className="font-serif text-xl font-medium text-foreground">Saving form securely...</p>
+          <p className="text-base font-medium text-foreground">Saving form securely...</p>
         </div>
       )}
 
       {step === 'review' && schema && (
         <div className="space-y-10 animate-in slide-in-from-bottom-6 fade-in duration-500">
           <div>
-            <h1 className="text-3xl font-serif font-medium mb-2">Review & Adjust</h1>
+            <h1 className="text-2xl font-semibold mb-2">Review & Adjust</h1>
             <p className="text-foreground/60">Edit the generated fields before publishing.</p>
           </div>
 
@@ -290,7 +290,7 @@ export default function CreateFormPage() {
             <input
               value={schema.title}
               onChange={e => setSchema({ ...schema, title: e.target.value })}
-              className="w-full bg-transparent text-2xl font-serif font-medium border-b border-foreground/10 pb-2 focus:outline-none focus:border-accent-amber transition-colors"
+              className="w-full bg-transparent text-xl font-semibold border-b border-foreground/10 pb-2 focus:outline-none focus:border-accent-amber transition-colors"
             />
             <input
               value={schema.description}
@@ -387,7 +387,7 @@ export default function CreateFormPage() {
           <div className="flex justify-end pt-4">
             <button
               onClick={handleConfirm}
-              className="flex items-center gap-2 rounded-full bg-accent-amber px-8 py-3.5 text-sm font-semibold text-black shadow-sm transition-transform hover:scale-105"
+              className="flex items-center gap-2 rounded-full bg-accent-amber px-8 py-3.5 text-sm font-semibold text-black shadow-sm hover:opacity-90 transition-opacity"
             >
               <CheckCircle2 className="h-4 w-4" />
               Confirm & Publish Form

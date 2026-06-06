@@ -7,7 +7,7 @@ import { CheckCircle2, XCircle, Loader2 } from 'lucide-react'
 
 type KeyStatus = 'idle' | 'checking' | 'valid' | 'invalid'
 
-export default function SettingsForm({ initialGemini, initialGroq, initialGoogleTTS, initialGcpProjectId }: { initialGemini: string; initialGroq: string; initialGoogleTTS?: string; initialGcpProjectId?: string }) {
+export default function SettingsForm({ initialGemini, initialGroq, initialGoogleTTS, initialGcpProjectId, hasPlatformKeys }: { initialGemini: string; initialGroq: string; initialGoogleTTS?: string; initialGcpProjectId?: string; hasPlatformKeys?: boolean }) {
   const [geminiKey, setGeminiKey] = useState(initialGemini)
   const [groqKey, setGroqKey] = useState(initialGroq)
   const [googleTTSKey, setGoogleTTSKey] = useState(initialGoogleTTS || '')
@@ -34,24 +34,24 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
     setGoogleTTSError('')
     setErrorMessage('')
 
-    // Step 1: Pre-flight validation
-    const validation = await validateAPIKeys(geminiKey, groqKey, googleTTSKey)
+    // Step 1: Pre-flight validation — only validate non-empty fields
+    const needsValidation = geminiKey || groqKey || googleTTSKey
+    if (needsValidation) {
+      const validation = await validateAPIKeys(geminiKey, groqKey, googleTTSKey)
 
-    setGeminiStatus(validation.gemini ? 'valid' : 'invalid')
-    setGroqStatus(validation.groq ? 'valid' : 'invalid')
-    if (googleTTSKey) {
-      setGoogleTTSStatus(validation.googleTTS ? 'valid' : 'invalid')
-    }
+      if (geminiKey) setGeminiStatus(validation.gemini ? 'valid' : 'invalid')
+      if (groqKey) setGroqStatus(validation.groq ? 'valid' : 'invalid')
+      if (googleTTSKey) setGoogleTTSStatus(validation.googleTTS ? 'valid' : 'invalid')
 
-    if (validation.geminiError) setGeminiError(validation.geminiError)
-    if (validation.groqError) setGroqError(validation.groqError)
-    if (validation.googleTTSError) setGoogleTTSError(validation.googleTTSError)
+      if (validation.geminiError) setGeminiError(validation.geminiError)
+      if (validation.groqError) setGroqError(validation.groqError)
+      if (validation.googleTTSError) setGoogleTTSError(validation.googleTTSError)
 
-
-    if (!validation.gemini || !validation.groq || (googleTTSKey && !validation.googleTTS)) {
-      setStatus('error')
-      setErrorMessage('One or more keys failed validation. Please fix them before saving.')
-      return
+      if ((geminiKey && !validation.gemini) || (groqKey && !validation.groq) || (googleTTSKey && !validation.googleTTS)) {
+        setStatus('error')
+        setErrorMessage('One or more keys failed validation. Please fix them before saving.')
+        return
+      }
     }
 
     // Step 2: Save to DB
@@ -79,6 +79,15 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
 
   return (
     <form onSubmit={handleSave} className="space-y-6 max-w-xl">
+      {hasPlatformKeys && (
+        <div className="flex items-start gap-3 p-4 rounded-xl bg-accent-sage/10 border border-accent-sage/20 text-sm">
+          <CheckCircle2 className="h-4 w-4 text-accent-sage mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium text-accent-sage">Platform keys are active</p>
+            <p className="text-foreground/60 mt-0.5">Your forms work out of the box. Add your own keys below to use your personal API quota.</p>
+          </div>
+        </div>
+      )}
       <div className="space-y-4 bg-foreground/[0.02] border border-foreground/10 p-6 rounded-2xl">
         {/* Gemini Key */}
         <div>
@@ -89,7 +98,6 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
           <input
             id="gemini_key"
             type="password"
-            required
             value={geminiKey}
             onChange={(e) => { setGeminiKey(e.target.value); setGeminiStatus('idle') }}
             placeholder="AIzaSy..."
@@ -106,7 +114,6 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
           <input
             id="groq_key"
             type="password"
-            required
             value={groqKey}
             onChange={(e) => { setGroqKey(e.target.value); setGroqStatus('idle') }}
             placeholder="gsk_..."

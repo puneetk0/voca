@@ -119,21 +119,12 @@ export default function LandingPage({
       </div>
 
       {/* ─── Footer ─── */}
-      <footer className="text-center px-6 py-5 text-xs text-foreground/20 border-t border-foreground/[0.04]">
+      <footer className="text-center px-6 py-5 text-xs text-foreground/20 border-t border-foreground/[0.04] flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
         <span>© 2025 Voca</span>
-        <span className="mx-2">·</span>
-        <Link href="/login" className="hover:text-foreground/40 transition-colors">
-          Sign in
-        </Link>
-        <span className="mx-2">·</span>
-        <a
-          href="https://github.com/puneetk0/voca"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="hover:text-foreground/40 transition-colors"
-        >
-          GitHub
-        </a>
+        <Link href="/login" className="hover:text-foreground/40 transition-colors">Sign in</Link>
+        <Link href="/privacy" className="hover:text-foreground/40 transition-colors">Privacy</Link>
+        <Link href="/terms" className="hover:text-foreground/40 transition-colors">Terms</Link>
+        <a href="https://github.com/puneetk0/voca" target="_blank" rel="noopener noreferrer" className="hover:text-foreground/40 transition-colors">GitHub</a>
       </footer>
     </main>
   )

@@ -1,5 +1,6 @@
 'use server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
+import { sendResponseNotification } from '@/lib/email'
 
 export async function submitResponse(formData: FormData) {
   const supabase = supabaseAdmin
@@ -28,13 +29,14 @@ export async function submitResponse(formData: FormData) {
     }
   }
 
-  // 2. Fetch valid field IDs for this form to prevent FK violations
-  const { data: validFields } = await supabase
-    .from('fields')
-    .select('id')
-    .eq('form_id', formId)
-  
-  const validFieldIds = new Set(validFields?.map(f => f.id) || [])
+  // 2. Fetch form info + valid fields in parallel
+  const [formResult, fieldsResult] = await Promise.all([
+    supabase.from('forms').select('user_id, title').eq('id', formId).single(),
+    supabase.from('fields').select('id, label').eq('form_id', formId),
+  ])
+
+  const validFields = fieldsResult.data ?? []
+  const validFieldIds = new Set(validFields.map(f => f.id))
 
   // 3. Insert Answers (with optional audio URLs)
   const answersToInsert = (await Promise.all(
@@ -86,6 +88,22 @@ export async function submitResponse(formData: FormData) {
     messages: history
   })
   if (transcriptErr) console.error('Error inserting transcript:', transcriptErr)
+
+  // 5. Email notification — fire and forget, don't block the response
+  if (formResult.data) {
+    const { user_id, title } = formResult.data
+    supabase.auth.admin.getUserById(user_id).then(({ data }) => {
+      const email = data?.user?.email
+      if (!email) return
+      return sendResponseNotification({
+        toEmail: email,
+        formTitle: title,
+        formId,
+        fields: validFields,
+        answers,
+      })
+    }).catch(err => console.error('[Email] Failed to send response notification:', err))
+  }
 
   return { success: true }
 }

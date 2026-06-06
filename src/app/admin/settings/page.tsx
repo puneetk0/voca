@@ -16,20 +16,23 @@ export default async function SettingsPage() {
     .eq('user_id', user.id)
     .single()
 
+  const hasPlatformKeys = !!(process.env.GROQ_KEY || process.env.GROQ_KEY_2)
+
   return (
     <main className="max-w-3xl mx-auto py-12 px-6">
       <div className="mb-10">
-        <h1 className="text-3xl font-serif font-medium text-foreground tracking-tight flex items-center gap-3">
-          <Key className="h-6 w-6 text-foreground/50" /> API Settings
+        <h1 className="text-3xl font-medium text-foreground tracking-tight flex items-center gap-3">
+          <Key className="h-6 w-6 text-foreground/50" /> API Keys
         </h1>
-        <p className="mt-2 text-foreground/60">Update your model credentials.</p>
+        <p className="mt-2 text-foreground/60">Optional — add your own keys to use your personal API quota.</p>
       </div>
-      
-      <SettingsForm 
-        initialGemini={keys?.gemini_key || ''} 
-        initialGroq={keys?.groq_key || ''} 
+
+      <SettingsForm
+        initialGemini={keys?.gemini_key || ''}
+        initialGroq={keys?.groq_key || ''}
         initialGoogleTTS={keys?.google_tts_key || ''}
         initialGcpProjectId={keys?.gcp_project_id || ''}
+        hasPlatformKeys={hasPlatformKeys}
       />
     </main>
   )

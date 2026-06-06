@@ -103,12 +103,13 @@ export async function POST(req: Request) {
       .eq('user_id', form.user_id)
       .single()
 
-    if (!keys?.google_tts_key) {
+    const effectiveGoogleTTSKey = keys?.google_tts_key || process.env.GOOGLE_TTS_KEY || null
+    if (!effectiveGoogleTTSKey) {
       return NextResponse.json({ fallback: true })
     }
 
     const googleRes = await fetch(
-      `https://texttospeech.googleapis.com/v1/text:synthesize?key=${keys.google_tts_key}`,
+      `https://texttospeech.googleapis.com/v1/text:synthesize?key=${effectiveGoogleTTSKey}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

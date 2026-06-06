@@ -1,87 +1,72 @@
 import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
-import { Plus, MessageSquare, KeyRound } from 'lucide-react'
+import { Plus, MessageSquare } from 'lucide-react'
 
 export default async function AdminDashboard() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
-  // Fetch forms
-  const { data: forms, error } = await supabase
+  const { data: forms } = await supabase
     .from('forms')
     .select('id, title, created_at, is_active, responses(count)')
     .eq('user_id', user?.id)
     .order('created_at', { ascending: false })
 
-  const { data: keysData } = await supabase.from('user_keys').select('gemini_key, groq_key').eq('user_id', user?.id).single()
-  const hasKeys = keysData?.gemini_key && keysData?.groq_key
-
   return (
-    <main className="max-w-5xl mx-auto py-12 px-6">
-      <div className="flex items-center justify-between mb-10">
-        <h1 className="text-3xl font-serif font-medium text-foreground tracking-tight">Your Forms</h1>
-        <Link 
+    <main className="max-w-5xl mx-auto py-10 px-6">
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h1 className="text-2xl font-semibold text-foreground tracking-tight">Your Forms</h1>
+          <p className="text-sm text-foreground/50 mt-0.5">{forms?.length ?? 0} form{forms?.length !== 1 ? 's' : ''}</p>
+        </div>
+        <Link
           href="/admin/create"
-          className="flex items-center gap-2 rounded-full bg-accent-amber px-5 py-2.5 text-sm font-semibold text-black shadow-sm transition-transform hover:scale-105"
+          className="flex items-center gap-2 rounded-full bg-accent-amber px-5 py-2.5 text-sm font-semibold text-black shadow-sm hover:opacity-90 transition-opacity"
         >
           <Plus className="h-4 w-4" />
-          Create New Form
+          New Form
         </Link>
       </div>
 
-      {!hasKeys && (
-        <div className="mb-8 rounded-2xl bg-accent-amber/10 border border-accent-amber/20 p-6 flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <div className="flex items-center justify-center bg-accent-amber/20 rounded-full h-10 w-10 shrink-0">
-               <KeyRound className="h-5 w-5 text-accent-amber" />
-            </div>
-            <div>
-              <h3 className="font-medium text-foreground text-sm">Action Required: API Keys Missing</h3>
-              <p className="text-sm text-foreground/70 mt-1">You must configure your Groq and Google Gemini API keys in Settings before creating forms.</p>
-            </div>
-          </div>
-          <Link href="/admin/settings" className="shrink-0 bg-accent-amber text-black text-sm font-semibold px-5 py-2.5 rounded-full hover:opacity-90 transition-opacity">
-            Configure Keys
+      {!forms || forms.length === 0 ? (
+        <div className="text-center py-24 border border-dashed border-foreground/15 rounded-2xl">
+          <MessageSquare className="h-10 w-10 text-foreground/20 mx-auto mb-4" />
+          <h3 className="text-base font-medium text-foreground">No forms yet</h3>
+          <p className="mt-2 text-sm text-foreground/50 max-w-xs mx-auto">
+            Create your first voice form in 30 seconds — just describe what you want to collect.
+          </p>
+          <Link href="/admin/create" className="inline-flex items-center gap-2 mt-6 rounded-full bg-accent-amber px-6 py-2.5 text-sm font-semibold text-black hover:opacity-90 transition-opacity">
+            <Plus className="h-4 w-4" /> Create your first form
           </Link>
         </div>
-      )}
-
-      {!forms || forms.length === 0 ? (
-        <div className="text-center py-20 border border-dashed border-foreground/20 rounded-2xl">
-          <MessageSquare className="h-12 w-12 text-foreground/30 mx-auto mb-4" />
-          <h3 className="text-lg font-medium text-foreground">No forms yet</h3>
-          <p className="mt-2 text-sm text-foreground/60 max-w-sm mx-auto">
-            Get started by creating a form. Just describe what you want to collect using natural language.
-          </p>
-        </div>
       ) : (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {forms.map((form) => (
-            <Link 
-              key={form.id} 
-              href={`/admin/forms/${form.id}`}
-              className="bg-foreground/[0.02] border border-foreground/10 p-6 rounded-2xl hover:bg-foreground/[0.05] hover:border-foreground/20 transition-all group relative overflow-hidden"
-            >
-              <h3 className="font-serif text-xl font-medium tracking-tight mb-2 pr-8">{form.title}</h3>
-              <p className="text-xs text-foreground/50">
-                Created {new Date(form.created_at).toLocaleDateString()}
-              </p>
-              
-              <div className="mt-8 flex items-center justify-between">
-                <span className={`inline-flex items-center rounded-md px-2 py-1 text-xs font-medium ring-1 ring-inset ${form.is_active ? 'bg-accent-sage/10 text-accent-sage ring-accent-sage/20' : 'bg-foreground/10 text-foreground/70 ring-foreground/20'}`}>
-                  {form.is_active ? 'Active' : 'Draft'}
-                </span>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs text-foreground/40 font-medium">
-                    {(form as any).responses?.[0]?.count ?? 0} response{((form as any).responses?.[0]?.count ?? 0) !== 1 ? 's' : ''}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {forms.map((form) => {
+            const count = (form as any).responses?.[0]?.count ?? 0
+            return (
+              <Link
+                key={form.id}
+                href={`/admin/forms/${form.id}`}
+                className="bg-foreground/[0.02] border border-foreground/[0.08] p-5 rounded-2xl hover:border-foreground/20 hover:-translate-y-0.5 hover:bg-foreground/[0.04] transition-all duration-200 group"
+              >
+                <div className="flex items-center justify-between mb-4">
+                  <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${form.is_active ? 'bg-accent-sage/10 text-accent-sage ring-accent-sage/20' : 'bg-foreground/8 text-foreground/50 ring-foreground/15'}`}>
+                    {form.is_active ? 'Active' : 'Draft'}
                   </span>
-                  <span className="text-accent-amber text-sm font-medium opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1">
-                    View <span aria-hidden="true">&rarr;</span>
+                  <span className="text-2xl font-bold tabular-nums text-foreground/90">{count}</span>
+                </div>
+                <h3 className="font-medium text-sm text-foreground leading-snug line-clamp-2">{form.title}</h3>
+                <div className="mt-3 flex items-center justify-between">
+                  <p className="text-xs text-foreground/35">
+                    {new Date(form.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} · {count} {count !== 1 ? 'responses' : 'response'}
+                  </p>
+                  <span className="text-accent-amber text-xs font-medium opacity-0 group-hover:opacity-100 transition-opacity">
+                    Open →
                   </span>
                 </div>
-              </div>
-            </Link>
-          ))}
+              </Link>
+            )
+          })}
         </div>
       )}
     </main>

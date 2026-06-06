@@ -169,25 +169,35 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
 
   return (
     <div className="space-y-8">
-      {/* Epic 7: Analytics Dashboard */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <div className="bg-foreground/[0.02] border border-foreground/10 rounded-2xl p-6">
-          <p className="text-sm text-foreground/50 font-medium">Total Responses</p>
-          <p className="text-3xl font-serif mt-2">{stat.total}</p>
+      {/* Analytics Dashboard */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="bg-foreground/[0.02] border border-foreground/10 rounded-2xl p-5">
+          <p className="text-xs text-foreground/50 font-medium uppercase tracking-wide">Total</p>
+          <p className="text-3xl font-bold mt-2 tabular-nums">{stat.total}</p>
         </div>
-        <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-6">
-          <p className="text-sm text-emerald-600/80 font-medium">Positive Tone</p>
-          <p className="text-3xl font-serif mt-2 text-emerald-600">{stat.positive}</p>
+        <div className="bg-accent-sage/[0.06] border border-accent-sage/15 rounded-2xl p-5">
+          <p className="text-xs text-accent-sage/80 font-medium uppercase tracking-wide">Positive</p>
+          <p className="text-3xl font-bold mt-2 tabular-nums text-accent-sage">{stat.positive}</p>
         </div>
-        <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-6">
-          <p className="text-sm text-amber-600/80 font-medium">Hesitant</p>
-          <p className="text-3xl font-serif mt-2 text-amber-600">{stat.hesitant}</p>
+        <div className="bg-accent-amber/[0.06] border border-accent-amber/15 rounded-2xl p-5">
+          <p className="text-xs text-accent-amber/80 font-medium uppercase tracking-wide">Hesitant</p>
+          <p className="text-3xl font-bold mt-2 tabular-nums text-accent-amber">{stat.hesitant}</p>
         </div>
-        <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-6">
-          <p className="text-sm text-red-600/80 font-medium">Frustrated</p>
-          <p className="text-3xl font-serif mt-2 text-red-600">{stat.frustrated}</p>
+        <div className="bg-accent-rose/[0.06] border border-accent-rose/15 rounded-2xl p-5">
+          <p className="text-xs text-accent-rose/80 font-medium uppercase tracking-wide">Frustrated</p>
+          <p className="text-3xl font-bold mt-2 tabular-nums text-accent-rose">{stat.frustrated}</p>
         </div>
       </div>
+
+      {/* Sentiment distribution bar */}
+      {stat.total > 0 && (
+        <div className="flex gap-1 h-1.5 rounded-full overflow-hidden">
+          {stat.positive > 0 && <div style={{width: `${(stat.positive/stat.total)*100}%`}} className="bg-accent-sage rounded-full" />}
+          {stat.hesitant > 0 && <div style={{width: `${(stat.hesitant/stat.total)*100}%`}} className="bg-accent-amber rounded-full" />}
+          {stat.frustrated > 0 && <div style={{width: `${(stat.frustrated/stat.total)*100}%`}} className="bg-accent-rose rounded-full" />}
+          {stat.neutral > 0 && <div style={{width: `${(stat.neutral/stat.total)*100}%`}} className="bg-foreground/20 rounded-full" />}
+        </div>
+      )}
 
       <div className="relative overflow-x-auto rounded-2xl border border-foreground/10 bg-foreground/[0.02] max-h-[800px] overflow-y-auto">
         <table className="w-full text-sm text-left whitespace-nowrap">

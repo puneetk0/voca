@@ -6,6 +6,8 @@
   --foreground: #111111;
   --accent-amber: #c96a00;
   --accent-sage: #4a7c00;
+  --accent-rose: #e11d48;
+  --accent-indigo: #4f46e5;
   --surface: rgba(17, 17, 17, 0.04);
   --border: rgba(17, 17, 17, 0.08);
 }
@@ -15,6 +17,8 @@
   --color-foreground: var(--foreground);
   --color-accent-amber: var(--accent-amber);
   --color-accent-sage: var(--accent-sage);
+  --color-accent-rose: var(--accent-rose);
+  --color-accent-indigo: var(--accent-indigo);
   --color-surface: var(--surface);
   --color-border: var(--border);
   /* Font stack: Satoshi (downloaded) → system geometric sans → fallback */
@@ -30,6 +34,8 @@
     --foreground: #f0ece4;    /* Warm cream — not pure white */
     --accent-amber: #fbbf24;
     --accent-sage: #a3e635;
+    --accent-rose: #fb7185;
+    --accent-indigo: #818cf8;
     --surface: rgba(240, 236, 228, 0.04);
     --border: rgba(240, 236, 228, 0.08);
   }

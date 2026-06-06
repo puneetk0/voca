@@ -52,7 +52,7 @@ export default async function FormDashboard({ params }: { params: Promise<{ id: 
 
       <div className="flex flex-col md:flex-row md:items-start justify-between gap-6 mb-12">
         <div>
-          <h1 className="text-3xl font-serif font-medium tracking-tight mb-2">{form.title}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight mb-2">{form.title}</h1>
           <p className="text-foreground/60">{form.description}</p>
         </div>
         
@@ -71,8 +71,8 @@ export default async function FormDashboard({ params }: { params: Promise<{ id: 
         </div>
       </div>
       <div className="space-y-6">
-        <h2 className="text-xl font-serif font-medium flex items-center gap-2">
-          Submissions <span className="bg-foreground/10 text-xs px-2.5 py-0.5 rounded-full font-sans">{responses?.length || 0}</span>
+        <h2 className="text-base font-semibold flex items-center gap-2">
+          Submissions <span className="bg-foreground/10 text-xs px-2.5 py-0.5 rounded-full font-medium">{responses?.length || 0}</span>
         </h2>
         <ResponsesTable
           formId={form.id}
