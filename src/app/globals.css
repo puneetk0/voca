@@ -1,10 +1,13 @@
 @import "tailwindcss";
 
+/* ─── Design Tokens ─── */
 :root {
-  --background: #fdfaf6;
-  --foreground: #1c1917;
-  --accent-amber: #d97706; /* slightly darker for light mode accessibility */
-  --accent-sage: #65a30d;
+  --background: #f5f2ee;
+  --foreground: #111111;
+  --accent-amber: #c96a00;
+  --accent-sage: #4a7c00;
+  --surface: rgba(17, 17, 17, 0.04);
+  --border: rgba(17, 17, 17, 0.08);
 }
 
 @theme inline {
@@ -12,21 +15,53 @@
   --color-foreground: var(--foreground);
   --color-accent-amber: var(--accent-amber);
   --color-accent-sage: var(--accent-sage);
-  --font-sans: var(--font-outfit), ui-sans-serif, system-ui, sans-serif;
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  /* Font stack: Satoshi (downloaded) → system geometric sans → fallback */
+  --font-sans: 'Satoshi', var(--font-outfit), ui-sans-serif, system-ui, sans-serif;
   --font-serif: var(--font-lora), ui-serif, Georgia, serif;
+  /* DM Mono for AI spoken text — contrasts human input */
+  --font-mono: var(--font-dm-mono), ui-monospace, 'Courier New', monospace;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0d1117; /* Deep navy-black */
-    --foreground: #fcfaf5; /* Cream/warm white */
+    --background: #111111;    /* Brutalist off-black */
+    --foreground: #f0ece4;    /* Warm cream — not pure white */
     --accent-amber: #fbbf24;
     --accent-sage: #a3e635;
+    --surface: rgba(240, 236, 228, 0.04);
+    --border: rgba(240, 236, 228, 0.08);
   }
+}
+
+/* ─── Satoshi self-hosted ─── */
+@font-face {
+  font-family: 'Satoshi';
+  src: url('/fonts/Satoshi-Variable.woff2') format('woff2');
+  font-weight: 300 900;
+  font-display: swap;
+  font-style: normal;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
+}
+
+/* ─── AI message typography — DM Mono ─── */
+.ai-text {
+  font-family: var(--font-mono);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+/* ─── Confirmation pill timer bar ─── */
+@keyframes pill-drain {
+  from { width: 100%; }
+  to   { width: 0%; }
+}
+.pill-timer {
+  animation: pill-drain 2000ms linear forwards;
 }

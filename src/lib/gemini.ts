@@ -76,3 +76,36 @@ async function callGroqFallback(groqKey: string, systemInstruction: string, user
   })
   return completion.choices[0]?.message?.content ?? '{}'
 }
+
+// Groq-first strategy: try Llama-3.3-70B (fast, capable) → fall back to Gemini on failure.
+// Used by the converse route where latency matters more than the last 5% of instruction-following.
+export async function callFastFirst(
+  groqKey: string,
+  geminiKey: string | null,
+  systemInstruction: string,
+  userPrompt: string,
+): Promise<string> {
+  if (!groqKey && geminiKey) {
+    return callGeminiWithRetry(geminiKey, null, 'gemini-2.5-flash', systemInstruction, userPrompt)
+  }
+  try {
+    const groq = getGroqClient(groqKey)
+    const completion = await groq.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: systemInstruction + '\nRespond ONLY with valid JSON.' },
+        { role: 'user', content: userPrompt },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 600,
+    })
+    console.log('[LLM] Groq primary succeeded')
+    return completion.choices[0]?.message?.content ?? '{}'
+  } catch (err: any) {
+    console.warn('[LLM] Groq primary failed, falling back to Gemini:', err?.message)
+    if (geminiKey) {
+      return callGeminiWithRetry(geminiKey, null, 'gemini-2.5-flash', systemInstruction, userPrompt)
+    }
+    throw err
+  }
+}

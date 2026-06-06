@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
-import { callGeminiWithRetry } from '@/lib/gemini'
+import { callFastFirst } from '@/lib/gemini'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -93,6 +93,7 @@ function buildSystemPrompt(
   currentFieldLabel: string,
   userEmail?: string,
   currentFieldOptions?: string[],
+  currentLanguage: 'hi' | 'en' = 'hi',
 ): string {
   let fieldRules = getFieldRules(fieldType, userEmail)
 
@@ -121,35 +122,49 @@ FIELD TYPE: Multiple Choice
   // Use the first real field ID as the example in the prompt so Gemini doesn't copy a fake placeholder
   const exampleId = allFields[0]?.id ?? 'FIELD_UUID'
 
-  return `You are having a friendly, flowing conversation to help someone fill out a form called "${formTitle}".
+  const isHindi = currentLanguage === 'hi'
 
-You're not a bot reading out form fields. You're more like a helpful friend who happens to be collecting some info. You already have context from the whole conversation — use it to make transitions feel natural, not mechanical.
+  return `You are having a warm, flowing conversation to help someone fill out a form called "${formTitle}".
+
+You are not a bot reading fields. You are an empathetic, active listener who genuinely cares about what the person is saying — not just extracting data. You already have context from the whole conversation; use it to make every transition feel human, not mechanical.
 
 FORM OVERVIEW (all fields, for your context):
 ${fieldList}
 
 YOUR CURRENT TASK: Extract the answer for "${currentFieldLabel}"
 
-CONVERSATION STYLE:
-- Keep the tone primarily English (around 80% to 90%), using Hindi sparsely. If using Hindi, it should be premium conversation, not overly casual. IF the user speaks purely in English, adjust to speak 100% English.
-- Avoid repeating slang like "yaar" excessively. Use a rich vocabulary of natural phrasing.
-- When speaking numbers in your response, NEVER use Hindi words for them (e.g., never say "paanch"). ALWAYS use the English word ("five").
-- If it is the VERY FIRST turn of the conversation, DO NOT start with generic professional greetings like "Hello there". Start with a friendly, energetic, native Hinglish hook like "Kaise ho jii! Bas kuch cheezein poochhni hai for {insert context} jaldi se shuru krte hai" in a very warm and natural tone, followed by the first question.
-- Speak like a highly empathetic, natural human. Keep it incredibly warm, friendly, and welcoming. Add a subtle touch of lighthearted humor where natural to make them smile.
-- React genuinely to what they said. If it's an interesting course or a cool name, compliment it briefly before asking the next thing.
-- Use their previous answers to make transitions feel connected. Example: if they said they're from Delhi, say "Delhi! Love the food there! So what's the best number to reach you on?"
-- NEVER start your response with conversational filler words like "Perfect", "Got it", "Okay", "Hmm", "Right", "Interesting", or "Nice". Keep it lean and jump STRAIGHT into your response or the next question. Example: instead of "Perfect... Puneet right? What's the course...", just say "Puneet right? What's the course...". This is critical because the voice engine will automatically play a "Hmm..." sound before your text, so you must not double up.
-- If someone hesitates, self-corrects, or rambles — be warm: "Take your time" or just accept what makes sense and move on.
-- If the answer type is obviously wrong (name given instead of phone), be light about it: "Think I need your number there, not your name — what's a good one to reach you on?"
+LANGUAGE: ${isHindi ? 'Hindi' : 'English'}
+${isHindi ? `- Respond in natural, conversational Hindi (Devanagari script) in spokenMessage. Simple, everyday Hindi — like a helpful friend, not a formal document.
+- SWITCH DETECTION: If the user explicitly asks to switch to English ("English mein baat karo", "switch to English", "please speak English", "can you speak English" or any clear English switch request), set "language" to "en" in your JSON response and respond in English from this turn.` : `- Respond in warm Indian English. The user switched from Hindi — continue in English for the rest of this conversation.`}
+- extractedValues MUST always be in English/Latin script, never Hindi script. Transliterate: "पुनीत" → "Puneet".
+- displayedMessage MUST always be in English regardless of language.
 
-FORMAT RULES (your responses are read aloud by a voice engine — this is critical):
-- ALL \`extractedValue\` output MUST BE IN ENGLISH ALPHABET (Latin script). Translate or transliterate any Hindi/regional words perfectly. Example: "पुनीत" -> "Puneet". NEVER output Devanagari or alternative scripts.
-- Write exactly as someone speaks. Contractions always: "that's", "what's", "you're" — never "that is", "what is".
-- Zero markdown. No asterisks, no lists, no headers, no bullet points, no hyphens as bullets. Ever.
+OPENING HOOK (ONLY on the very first turn — when conversation history is empty):
+${isHindi
+    ? `नमस्ते से शुरू करें और एक warm, friendly sentence में बताएं कि user यहाँ किसलिए है। Template: "नमस्ते! मैं यहाँ आपकी [${formTitle} का purpose 5 शब्दों में] में मदद करने आया हूँ — बस दो मिनट लगेंगे, आप मुझसे बिल्कुल आराम से बात कर सकते हैं। [First question in Hindi]"
+Do NOT use generic openers. Make it feel like a friend is texting them.`
+    : `Open with a warm context-setting sentence. Template: "Hey, I'm here to help you [purpose of ${formTitle} in 5 words] — this'll take about two minutes, you can just talk to me normally. [First question]"
+Do NOT use generic openers like "Hello there" or "Welcome". Make it feel like a friend texted them.`}
+
+EMOTIONAL SIGNAL DETECTION (critical — read between the lines):
+Analyze the TONE of the user's response, not just the content. Then respond accordingly (in the current language):
+- HESITANT (self-deprecating, unsure): Validate WARMLY and specifically before moving on.
+- FRUSTRATED (short/clipped, repeated corrections): Acknowledge and take the blame. Re-ask simply.
+- EXCITED (enthusiastic): Mirror their energy.
+- POSITIVE/NEUTRAL: Respond naturally.
+
+CONVERSATION STYLE:
+- Warm, genuine, conversational — a friendly colleague, never a customer service agent.
+- NEVER start with filler words like: "Perfect", "Got it", "Okay", "Hmm", "Right", "Great", "Awesome". Jump straight in.
+- ${isHindi ? 'Use natural Hindi transitional words sparingly: "अच्छा", "बढ़िया", "ठीक है" — each only once per conversation.' : 'FILLER WORD ROTATION (strict): One acknowledgment per turn, each used only once: ["Love that", "Noted", "Makes sense", "That works", "Good to know", "Appreciated", "Solid"].'}
+- React genuinely. Reference previous answers to make transitions feel connected.
+- If someone hesitates or rambles, be warm and accepting.
+
+FORMAT RULES (responses are read aloud — non-negotiable):
+- Zero markdown. No asterisks, lists, headers, bullets. Ever.
 - Maximum ONE question per response. Maximum TWO sentences total.
 - Never end with more than one question mark.
-- Spell out numbers in conversational context: "one more thing" not "1 more thing".
-- No em dashes (—) — use a comma or period instead.
+- No em dashes — use a comma or period instead.
 
 ${fieldRules}
 
@@ -158,15 +173,18 @@ RESPONSE FORMAT: Valid JSON only, nothing else, no markdown fences:
   "extractedValues": { "${exampleId}": "the extracted value" },
   "nextFieldIndex": 1,
   "sentiment": "positive | neutral | hesitant | frustrated",
-  "spokenMessage": "your conversational audio script goes here",
-  "displayedMessage": "ONLY the core question to display on screen. MUST BE 100% FORMAL ENGLISH, NEVER HINGLISH OR HINDI"
+  "language": "${isHindi ? 'hi' : 'en'}",
+  "spokenMessage": "${isHindi ? 'your response in Hindi (Devanagari) — warm, human, read aloud' : 'your response in English — warm, human, read aloud'}",
+  "displayedMessage": "ONLY the core question shown on screen. Always in English.",
+  "personalizationHints": { "name": "extracted name if known, else null", "keyDataPoint": "most meaningful non-name answer so far, else null" }
 }
 
 IMPORTANT FOR JSON SCHEMA:
-- "extractedValues": A JSON object mapping the EXACT field ID (from the FORM OVERVIEW above) to the extracted value. Copy the IDs EXACTLY — do not invent IDs. If nothing valid was extracted, return null or {}.
-- Use the real IDs from the form overview. For example: { "${exampleId}": "extracted value" }.
-- "nextFieldIndex": The 0-indexed integer of the NEXT field to ask. Usually current + 1.
-- "sentiment": Analyze the underlying emotion of the user's latest message. Pick one of the four options.
+- "extractedValues": Map the EXACT field ID to extracted value. Copy IDs exactly. If nothing extracted, return {}.
+- "nextFieldIndex": 0-indexed integer of the NEXT field. Usually current + 1.
+- "sentiment": One of the four options, based on tone analysis.
+- "language": "${isHindi ? 'hi' : 'en'}" normally. Set to "en" ONLY when user explicitly requests English switch.
+- "personalizationHints": Always populate if you have the data.
 `
 }
 
@@ -180,6 +198,7 @@ export async function POST(req: Request) {
       extraContext,
       userEmail,
       confidence,
+      currentLanguage,
     } = await req.json()
 
     if (ratelimit) {
@@ -208,7 +227,7 @@ export async function POST(req: Request) {
       .select('gemini_key, groq_key')
       .eq('user_id', form.user_id)
       .single()
-    if (!keys?.gemini_key) {
+    if (!keys?.groq_key && !keys?.gemini_key) {
       return NextResponse.json(
         { error: 'Form owner has not configured API keys' },
         { status: 400 },
@@ -223,6 +242,8 @@ export async function POST(req: Request) {
     const currentField = fields[currentFieldIndex]
     const isLastField = currentFieldIndex === fields.length - 1
 
+    const lang: 'hi' | 'en' = currentLanguage === 'en' ? 'en' : 'hi'
+
     const systemInstruction = buildSystemPrompt(
       form.title,
       currentField.field_type,
@@ -230,6 +251,7 @@ export async function POST(req: Request) {
       currentField.label,
       userEmail,
       currentField.options ?? undefined,
+      lang,
     )
 
     // Keep last 10 turns (5 exchanges) — bumped from 6 to give Gemini more
@@ -243,7 +265,10 @@ export async function POST(req: Request) {
     const nextField = !isLastField ? fields[currentFieldIndex + 1] : null
     const nextFieldContext = nextField
       ? `After extracting the current answer, transition naturally into asking about: "${nextField.label}" (${nextField.field_type}). Reference their previous answer if it makes the transition feel connected.`
-      : `This is the LAST field. After extracting the answer, close with a very warm, human thank you. For example, say it was great talking to them, thank them for their patience, and since they are filling a form, add a bright/humorous sign off like "Hope to see you there!" or something similarly natural.`
+      : `This is the LAST field. After extracting the answer, give a warm, specific sign-off in ONE sentence only.
+- If you know the user's name from the conversation history, USE it: "Thanks Puneet, we're all set!"
+- Reference something specific they told you — their city, their course, their farm size, their company. Make it feel like you actually listened, not a generic farewell.
+- No more questions. No "Hope to see you there!" unless the form context genuinely warrants it. Just a warm, real, specific human goodbye.`
 
     const userPrompt = [
       extraContext ?? '',
@@ -255,15 +280,14 @@ export async function POST(req: Request) {
       `User: ${userMessage}`,
     ].filter(Boolean).join('\n')
 
-    const responseText = await callGeminiWithRetry(
-      keys.gemini_key,
-      keys.groq_key ?? null,
-      'gemini-2.5-flash',
+    const responseText = await callFastFirst(
+      keys.groq_key ?? '',
+      keys.gemini_key ?? null,
       systemInstruction,
       userPrompt,
     )
 
-    let parsed: { extractedValues?: Record<string, string>; extractedValue?: string | null; nextFieldIndex?: number; sentiment?: string; spokenMessage: string; displayedMessage: string }
+    let parsed: { extractedValues?: Record<string, string>; extractedValue?: string | null; nextFieldIndex?: number; sentiment?: string; language?: string; spokenMessage: string; displayedMessage: string }
     try {
       const cleaned = responseText
         .replace(/^```(?:json)?\s*/i, '')
@@ -310,12 +334,16 @@ export async function POST(req: Request) {
 
     const hasExtracted = Object.keys(sanitizedExtractedValues).length > 0;
 
+    // Language: default to current, switch to 'en' only when AI explicitly signals it
+    const responseLanguage: 'hi' | 'en' = parsed.language === 'en' ? 'en' : lang
+
     return NextResponse.json({
       aiSpokenMessage: parsed.spokenMessage,
       aiMessage: parsed.displayedMessage,
       extractedValues: sanitizedExtractedValues,
       nextFieldIndex: nextIndex,
       sentiment: finalSentiment,
+      language: responseLanguage,
       isComplete: isLastField && (hasExtracted || nextIndex >= fields.length),
     })
 

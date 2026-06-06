@@ -3,15 +3,15 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useConversationStore } from '@/lib/store/conversation'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Mic, Keyboard, Send, CheckCircle2, Square, WifiOff, ExternalLink, AlertTriangle } from 'lucide-react'
+import { Mic, Keyboard, Send, Square, WifiOff, CheckCircle2 } from 'lucide-react'
 import { submitResponse } from '@/lib/actions/submit'
 import { useVoiceRecorder } from '@/lib/hooks/useVoiceRecorder'
-import Waveform from '@/components/voice/Waveform'
+import { useTTS, type VoiceState } from '@/lib/hooks/useTTS'
 import Typewriter, { TypewriterHandle } from '@/components/chat/Typewriter'
 import { createClient } from '@/lib/supabase/client'
 import { toast } from 'sonner'
-
-type VoiceState = 'idle' | 'thinking' | 'speaking' | 'listening' | 'transcribing' | 'error'
+import ReviewScreen from './ReviewScreen'
+import SuccessScreen from './SuccessScreen'
 
 const GHOST_MESSAGES = [
   "Taking a moment — bear with me.",
@@ -63,51 +63,27 @@ export default function FormSession({
   // Ref that mirrors voiceState — allows reading current value inside async closures
   // without stale-closure bugs (React state is always the captured render value)
   const voiceStateRef = useRef<VoiceState>('idle')
-  // audioRef must be created on a direct user gesture to satisfy browser autoplay policy.
-  // We create it the moment the user taps "Talk with me" — NOT lazily later.
-  // On iOS, an Audio element created outside a user gesture will be blocked silently.
-  const audioRef = useRef<HTMLAudioElement | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const typewriterRef = useRef<TypewriterHandle>(null)
 
-  // Guard refs — prevent VAD race conditions
-  // isSpeakingRef: true for entire TTS playback duration, blocks VAD → startRecording race
-  // isHandlingTranscriptRef: true while a converse call is in-flight, blocks duplicate fires
-  const isSpeakingRef = useRef(false)
+  // Tracks the most recently confirmed answer to show between questions
+  const [lastConfirmedAnswer, setLastConfirmedAnswer] = useState<{ label: string; value: string } | null>(null)
+  const lastConfirmedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Helper: show a confirmed answer pill for 3s then fade
+  const showConfirmedPill = useCallback((label: string, value: string) => {
+    setLastConfirmedAnswer({ label, value })
+    if (lastConfirmedTimerRef.current) clearTimeout(lastConfirmedTimerRef.current)
+    lastConfirmedTimerRef.current = setTimeout(() => setLastConfirmedAnswer(null), 4000)
+  }, [])
+
+  // isHandlingTranscriptRef: true while a converse call is in-flight, blocks duplicate VAD fires
   const isHandlingTranscriptRef = useRef(false)
 
-  // Hard-stop helper — kills TTS + Audio + resets speaking ref
-  // Must be called on the same call stack as the user tap (synchronous) to satisfy
-  // iOS autoplay policy before async work starts.
-  const killAudio = useCallback(() => {
-    isSpeakingRef.current = false
-    window.speechSynthesis.cancel()
-    if (audioRef.current) {
-      audioRef.current.onended = null
-      audioRef.current.pause()
-      audioRef.current.currentTime = 0
-    }
-  }, [])
+  const { audioRef, fillerAudioRef, fillerFormatRef, languageRef, isSpeakingRef, playSmartAudio, killAudio, playChime } = useTTS(form.id, setVoiceState)
 
-  const playChime = useCallback(() => {
-    try {
-      const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext
-      if (!AudioCtxClass) return
-      const ctx = new AudioCtxClass()
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.connect(gain)
-      gain.connect(ctx.destination)
-      osc.type = 'sine'
-      osc.frequency.setValueAtTime(600, ctx.currentTime)
-      osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.1)
-      gain.gain.setValueAtTime(0.05, ctx.currentTime)
-      gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3)
-      osc.start(ctx.currentTime)
-      osc.stop(ctx.currentTime + 0.3)
-      setTimeout(() => ctx.state !== 'closed' && ctx.close().catch(() => { }), 500)
-    } catch (e) { }
-  }, [])
+
+  const ANSWERS_KEY = `voca_answers_${form.id}`
 
   useEffect(() => {
     store.init(form.id, fields)
@@ -118,6 +94,14 @@ export default function FormSession({
       const fieldId = fieldsByLabel[key.toLowerCase().trim()]
       if (fieldId) store.setAnswer(fieldId, value)
     })
+    // Restore in-progress answers from localStorage
+    try {
+      const saved = localStorage.getItem(ANSWERS_KEY)
+      if (saved) {
+        const parsed = JSON.parse(saved) as Record<string, string>
+        Object.entries(parsed).forEach(([id, val]) => store.setAnswer(id, val))
+      }
+    } catch { }
     return () => {
       window.speechSynthesis.cancel()
       if (audioRef.current) {
@@ -127,6 +111,13 @@ export default function FormSession({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.id])
+
+  // Persist answers to localStorage on every change
+  useEffect(() => {
+    if (Object.keys(store.answers).length === 0) return
+    try { localStorage.setItem(ANSWERS_KEY, JSON.stringify(store.answers)) } catch { }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.answers])
 
   // Keep voiceStateRef in sync so async callbacks always read the current value
   useEffect(() => { voiceStateRef.current = voiceState }, [voiceState])
@@ -171,92 +162,6 @@ export default function FormSession({
     }
   }, [store.history, store.isAiTyping, store.mode])
 
-  // --- LATENCY MASKING ---
-  // Pre-fetch filler audio clips for latency masking.
-  // We keep a local cache of these clips to play instantly when the user stops talking,
-  // making the AI active and hiding the latency of Gemini and STT.
-  const fillerAudioRef = useRef<string[]>([])
-  useEffect(() => {
-    // Defer by 2s so it doesn't compete with critical first-render requests
-    // and doesn't burn rate-limit budget before the user even starts
-    const timer = setTimeout(async () => {
-      try {
-        const fillers = ["Hmm... okay", "Accha, ek second...", "Waitt let me note that down...", "Got it, ek second..."]
-        const results = await Promise.all(fillers.map(f =>
-          fetch('/api/tts', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ formId: form.id, text: f }),
-          }).then(res => res.json())
-        ))
-        fillerAudioRef.current = results.map(r => r.audioContent).filter(Boolean)
-      } catch (e) { }
-    }, 2000)
-    return () => clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.id])
-
-  // --- TTS ---
-  // Plays AI response audio. Uses Google TTS with native SpeechSynthesis fallback.
-  // isSpeakingRef is kept true for the entire playback duration to block
-  // any VAD from triggering startRecording while the AI is talking.
-  const playSmartAudio = useCallback(async (text: string, onEnd: () => void) => {
-    isSpeakingRef.current = true
-    setVoiceState('speaking')
-
-    // Cancel any currently playing audio
-    window.speechSynthesis.cancel()
-    if (audioRef.current) {
-      audioRef.current.pause()
-      audioRef.current.currentTime = 0
-    }
-
-    const handleEnd = () => {
-      isSpeakingRef.current = false
-      onEnd()
-    }
-
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ formId: form.id, text }),
-      })
-      const data = await res.json()
-      if (data.fallback || data.error || !data.audioContent) throw new Error('fallback')
-
-      // audioRef.current is guaranteed non-null here because we create it in
-      // handleInitialSequence on the user gesture that starts voice mode.
-      const audio = audioRef.current!
-      audio.src = `data:audio/mp3;base64,${data.audioContent}`
-      audio.onended = handleEnd
-      audio.onerror = () => {
-        console.warn('[TTS] Audio element error, falling back to native')
-        handleEnd()
-      }
-      // play() can throw on autoplay policy violations — catch and fallback
-      await audio.play().catch(() => { throw new Error('autoplay blocked') })
-
-    } catch (e) {
-      // Native SpeechSynthesis fallback
-      if (!('speechSynthesis' in window)) {
-        isSpeakingRef.current = false
-        onEnd()
-        return
-      }
-      const utterance = new SpeechSynthesisUtterance(text)
-      const voices = window.speechSynthesis.getVoices()
-      const preferredVoice = voices.find(v => v.lang.includes('en-IN'))
-        ?? voices.find(v => v.name.toLowerCase().includes('google'))
-        ?? null
-      if (preferredVoice) utterance.voice = preferredVoice
-      utterance.rate = 1.05
-      utterance.onend = handleEnd
-      utterance.onerror = () => { isSpeakingRef.current = false; onEnd() }
-      window.speechSynthesis.speak(utterance)
-    }
-  }, [form.id])
-
   // Optimistic thinking label shown while Gemini processes
   function getThinkingLabel(fieldType: string, transcript: string) {
     if (store.mode === 'voice') return 'Extracting your answer...'
@@ -286,6 +191,7 @@ export default function FormSession({
       history: store.history,
       userMessage,
       userEmail,
+      currentLanguage: languageRef.current,
       ...(extraContext ? { extraContext } : {}),
       confidence,
     })
@@ -302,6 +208,7 @@ export default function FormSession({
         history: store.history,
         userMessage,
         userEmail,
+        currentLanguage: languageRef.current,
         confidence,
       })
 
@@ -331,12 +238,25 @@ export default function FormSession({
     const data = result.data
     store.setConnectionLost(false)
 
-    if (data.extractedValues) {
-      Object.entries(data.extractedValues).forEach(([id, val]) => {
-        store.setAnswer(id, val as string)
+    // Language switch: if AI signals English, lock in for the rest of the session
+    // and clear Hindi fillers so we don't play Hindi audio before an English response
+    if (data.language === 'en' && languageRef.current === 'hi') {
+      languageRef.current = 'en'
+      fillerAudioRef.current = []
+    }
+
+    if (data.extractedValues && typeof data.extractedValues === 'object') {
+      Object.entries(data.extractedValues).forEach(([fieldId, value]) => {
+        if (value !== null && value !== undefined && value !== '') {
+          store.setAnswer(fieldId, value as string)
+          // Show the confirmed pill between questions
+          const matchedField = fields.find(f => f.id === fieldId)
+          if (matchedField) showConfirmedPill(matchedField.label, value as string)
+        }
       })
     } else if (data.extractedValue) {
       store.setAnswer(fields[fieldIndex].id, data.extractedValue)
+      showConfirmedPill(fields[fieldIndex].label, data.extractedValue)
     }
     
     if (data.sentiment) {
@@ -372,7 +292,7 @@ export default function FormSession({
   }, [form.id, store, fields, userEmail])
 
   // --- VOICE TRANSCRIPT HANDLER ---
-  const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream } = useVoiceRecorder(
+  const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream, vadVolume } = useVoiceRecorder(
     async (transcript, audioBlob, confidence) => {
       // Guard 1: AI is still speaking — ignore, VAD fired too early
       if (isSpeakingRef.current) return
@@ -414,7 +334,7 @@ export default function FormSession({
         const base64 = fillerAudioRef.current[Math.floor(Math.random() * fillerAudioRef.current.length)]
         audioRef.current.onended = null // CRITICAL: Clear old playback handlers!
         isSpeakingRef.current = true    // CRITICAL: Lock VAD while filler plays
-        audioRef.current.src = `data:audio/mp3;base64,${base64}`
+        audioRef.current.src = `data:audio/${fillerFormatRef.current};base64,${base64}`
         audioRef.current.play().catch(() => { })
         setVoiceState('speaking') // turns the orb instantly yellow/active
       } else {
@@ -523,6 +443,7 @@ export default function FormSession({
       })
 
       await submitResponse(formData)
+      try { localStorage.removeItem(ANSWERS_KEY) } catch { }
       playChime()
       store.setMode('success')
     } catch (e: any) {
@@ -608,12 +529,12 @@ export default function FormSession({
     const currentQuestionNum = Math.min(store.currentFieldIndex + 1, totalFields)
 
     const orbColour = voiceState === 'speaking'
-      ? 'bg-accent-amber shadow-[0_0_60px_rgba(245,158,11,0.25)]'
+      ? 'bg-gradient-to-br from-amber-400 to-orange-500 shadow-[0_0_80px_rgba(251,191,36,0.35)]'
       : voiceState === 'listening'
-        ? 'bg-accent-sage shadow-[0_0_60px_rgba(132,204,22,0.25)]'
+        ? 'bg-gradient-to-br from-lime-400 to-emerald-500 shadow-[0_0_80px_rgba(163,230,53,0.35)]'
         : voiceState === 'error'
           ? 'bg-red-500/80'
-          : 'bg-foreground/15'
+          : 'bg-foreground/10 border border-foreground/10'
 
     return (
       <main className="min-h-[100dvh] flex flex-col items-center justify-between p-6 pt-safe pb-safe bg-background overflow-hidden" role="main" aria-label={`Voice form: ${form.title}`}>
@@ -631,11 +552,12 @@ export default function FormSession({
           </div>
         </div>
 
-        {/* Ambient background glow */}
-        <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[500px] h-[500px] rounded-full blur-[120px] -z-10 transition-colors duration-1000 ${voiceState === 'speaking' ? 'bg-accent-amber/8'
-          : voiceState === 'listening' ? 'bg-accent-sage/8'
-            : 'bg-transparent'
-          }`} />
+        {/* Ambient background glow — brighter, two-tone */}
+        <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full blur-[140px] -z-10 transition-all duration-1000 pointer-events-none ${
+          voiceState === 'speaking' ? 'bg-amber-400/12'
+          : voiceState === 'listening' ? 'bg-lime-400/12'
+          : 'opacity-0'
+        }`} />
 
         <div />
 
@@ -670,12 +592,29 @@ export default function FormSession({
           </div>
 
           {/* Orb */}
-          <div className="relative flex items-center justify-center" style={{ width: 140, height: 140 }}>
+          <div className="relative flex items-center justify-center" style={{ width: 160, height: 160 }}>
+            {/* Outer pulse ring — only when listening */}
             {voiceState === 'listening' && (
               <motion.div
-                className="absolute inset-0 rounded-full bg-accent-sage/30"
-                animate={{ scale: [1, 1.35, 1], opacity: [0.6, 0, 0.6] }}
-                transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
+                className="absolute inset-0 rounded-full bg-lime-400/20"
+                animate={{ scale: [1, 1.5, 1], opacity: [0.5, 0, 0.5] }}
+                transition={{ repeat: Infinity, duration: 2, ease: 'easeInOut' }}
+              />
+            )}
+            {/* Second inner ring — listening */}
+            {voiceState === 'listening' && (
+              <motion.div
+                className="absolute inset-4 rounded-full bg-lime-400/10"
+                animate={{ scale: [1, 1.25, 1], opacity: [0.4, 0, 0.4] }}
+                transition={{ repeat: Infinity, duration: 2, delay: 0.3, ease: 'easeInOut' }}
+              />
+            )}
+            {/* Speaking pulse ring */}
+            {voiceState === 'speaking' && (
+              <motion.div
+                className="absolute inset-0 rounded-full bg-amber-400/20"
+                animate={{ scale: [1, 1.3, 1], opacity: [0.4, 0, 0.4] }}
+                transition={{ repeat: Infinity, duration: 1.5, ease: 'easeInOut' }}
               />
             )}
 
@@ -683,25 +622,38 @@ export default function FormSession({
               aria-label={voiceState === 'listening' ? 'Stop recording' : voiceState === 'error' ? 'Tap to retry recording' : 'Voice input orb'}
               onClick={() => {
                 if (voiceState === 'listening') stopRecording()
-                // P2: retry button — tap orb when in error state to try again
                 if (voiceState === 'error') {
                   isHandlingTranscriptRef.current = false
                   setVoiceState('idle')
                   startRecording()
                 }
               }}
-              className={`relative z-10 w-[140px] h-[140px] rounded-full flex flex-col items-center justify-center transition-colors duration-500 ${orbColour}`}
+              className={`relative z-10 w-[160px] h-[160px] rounded-full flex flex-col items-center justify-center transition-all duration-500 ${orbColour}`}
               animate={isThinking
-                ? { scale: [0.97, 1, 0.97], opacity: [0.6, 1, 0.6] }
+                ? { scale: [0.96, 1, 0.96], opacity: [0.5, 1, 0.5] }
                 : { scale: 1, opacity: 1 }
               }
               transition={{ repeat: isThinking ? Infinity : 0, duration: 1.4 }}
             >
+              {/* VAD waveform bars — only render when speech detected above noise floor */}
               {voiceState === 'listening' && (
-                <>
-                  <Waveform stream={stream} isActive={isRecording} color="#000" />
-                  <Square className="h-5 w-5 text-black fill-black mt-2 opacity-70" />
-                </>
+                <div className="flex items-end gap-[3px] h-8">
+                  {[0.7, 1.0, 0.6, 0.9, 0.5, 0.8, 0.4].map((multiplier, i) => {
+                    const barH = Math.max(4, Math.round(vadVolume * 28 * multiplier))
+                    return (
+                      <motion.span
+                        key={i}
+                        className="w-[3px] rounded-full bg-black/70"
+                        animate={{ height: barH }}
+                        transition={{ duration: 0.07, ease: 'linear' }}
+                        style={{ minHeight: 4, maxHeight: 28 }}
+                      />
+                    )
+                  })}
+                </div>
+              )}
+              {voiceState === 'listening' && (
+                <Square className="h-4 w-4 text-black/60 fill-black/60 mt-2" />
               )}
               {voiceState === 'error' && (
                 <div className="flex flex-col items-center gap-1">
@@ -711,6 +663,24 @@ export default function FormSession({
               )}
             </motion.button>
           </div>
+
+          {/* Confirmed answer pill — shown for 4s after answer is captured */}
+          <AnimatePresence>
+            {lastConfirmedAnswer && (
+              <motion.div
+                key={lastConfirmedAnswer.value}
+                initial={{ opacity: 0, y: 6, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -6, scale: 0.97 }}
+                transition={{ duration: 0.25 }}
+                className="flex items-center gap-2 px-4 py-2 rounded-full bg-foreground/[0.06] border border-foreground/[0.10]"
+              >
+                <CheckCircle2 className="h-3.5 w-3.5 text-accent-sage shrink-0" />
+                <span className="text-xs text-foreground/50 font-sans">{lastConfirmedAnswer.label}:</span>
+                <span className="text-xs text-foreground font-mono font-medium">{lastConfirmedAnswer.value}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
         </motion.div>
 
@@ -870,34 +840,86 @@ export default function FormSession({
   }
 
   if (store.mode === 'text') {
+    // Fade curve: only last 2 AI messages at full opacity, older ones muted
+    const aiMessageIds = store.history.filter(m => m.role === 'ai').map(m => m.id)
+    const recentAiIds = new Set(aiMessageIds.slice(-2))
+
     return (
       <main className="min-h-[100dvh] flex flex-col bg-background max-w-3xl mx-auto w-full relative" role="main" aria-label={`Text form: ${form.title}`}>
-        <header className="p-4 sm:p-6 pb-2 border-b border-foreground/5 bg-background/80 backdrop-blur-md sticky top-0 z-10 flex items-center justify-between">
+        <header className="p-4 sm:p-6 pb-3 border-b border-foreground/[0.06] bg-background/90 backdrop-blur-md sticky top-0 z-10 flex items-center justify-between">
           <h2 className="font-serif font-medium text-foreground tracking-tight truncate pr-4">{form.title}</h2>
-          <button onClick={() => store.setMode('review')} className="text-xs text-foreground/40 hover:text-foreground">Skip to review</button>
+          <div className="flex items-center gap-3">
+            {/* Back to voice — symmetric with voice mode's "tap to type" */}
+            <button
+              onClick={() => {
+                store.setMode('voice')
+                setInputText('')
+              }}
+              className="text-xs text-foreground/30 hover:text-foreground/60 transition-colors flex items-center gap-1"
+            >
+              <Mic className="h-3 w-3" /> Voice
+            </button>
+            <button onClick={() => store.setMode('review')} className="text-xs text-foreground/40 hover:text-foreground transition-colors">Review</button>
+          </div>
         </header>
 
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-6">
-          <AnimatePresence>
-            {store.history.map((msg, idx) => (
-              <motion.div key={msg.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                <div className={`max-w-[85%] sm:max-w-[75%] p-4 rounded-3xl ${msg.role === 'user'
-                  ? 'bg-foreground/[0.05] text-foreground rounded-tr-sm'
-                  : 'bg-transparent text-foreground font-serif text-xl sm:text-2xl leading-relaxed py-4'
+        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-5">
+          <AnimatePresence initial={false}>
+            {store.history.map((msg, idx) => {
+              const isLastAi = msg.role === 'ai' && !recentAiIds.has(msg.id)
+              const isCurrentAi = msg.role === 'ai' && aiMessageIds[aiMessageIds.length - 1] === msg.id
+              return (
+                <motion.div
+                  key={msg.id}
+                  layout
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{
+                    opacity: isLastAi ? 0.35 : 1,
+                    y: 0,
+                  }}
+                  transition={{ duration: 0.3 }}
+                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                >
+                  <div className={`max-w-[85%] sm:max-w-[75%] ${
+                    msg.role === 'user'
+                      ? 'bg-foreground/[0.06] border border-foreground/[0.08] text-foreground rounded-3xl rounded-tr-md px-5 py-3 text-sm font-sans'
+                      : 'bg-transparent text-foreground py-3'
                   }`}>
-                  {msg.role === 'ai' && idx === store.history.length - 1 && !store.isAiTyping ? (
-                    <Typewriter ref={typewriterRef} text={msg.text.replace('[Voice]', '')} speed={35} />
-                  ) : (
-                    msg.text.replace('[Voice]', '')
-                  )}
-                </div>
-              </motion.div>
-            ))}
+                    {msg.role === 'ai' && isCurrentAi && !store.isAiTyping ? (
+                      <Typewriter ref={typewriterRef} text={msg.text.replace('[Voice]', '')} speed={30}
+                        className="ai-text text-xl sm:text-2xl leading-snug"
+                      />
+                    ) : msg.role === 'ai' ? (
+                      <p className="ai-text text-xl sm:text-2xl leading-snug">{msg.text.replace('[Voice]', '')}</p>
+                    ) : (
+                      <span>{msg.text.replace('[Voice] ', '').replace('[Selected: ', '').replace(']', '')}</span>
+                    )}
+                  </div>
+                </motion.div>
+              )
+            })}
             {store.isAiTyping && (
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start p-4 py-4">
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex justify-start py-2">
                 <ThinkingDots />
+              </motion.div>
+            )}
+          </AnimatePresence>
+          {/* Confirmed answer pill — same as voice mode */}
+          <AnimatePresence>
+            {lastConfirmedAnswer && (
+              <motion.div
+                key={lastConfirmedAnswer.value}
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="flex justify-end"
+              >
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-accent-sage/10 border border-accent-sage/20">
+                  <CheckCircle2 className="h-3 w-3 text-accent-sage" />
+                  <span className="text-xs text-foreground/50 font-sans">{lastConfirmedAnswer.label}:</span>
+                  <span className="text-xs text-foreground font-mono">{lastConfirmedAnswer.value}</span>
+                </div>
               </motion.div>
             )}
           </AnimatePresence>
@@ -935,7 +957,7 @@ export default function FormSession({
             }
             return null
           })()}
-          <form onSubmit={handleSendText} className="relative flex items-center">
+          <form onSubmit={handleSendText} className="relative flex items-center gap-2">
             <input
               type="text"
               aria-label="Your response"
@@ -945,15 +967,27 @@ export default function FormSession({
               onFocus={() => typewriterRef.current?.finish()}
               disabled={store.isAiTyping}
               placeholder={fields[store.currentFieldIndex]?.field_type === 'mcq' ? 'Or type your choice...' : 'Type your response...'}
-              className="w-full bg-foreground/[0.03] border border-foreground/10 text-foreground rounded-full pl-6 pr-14 py-4 focus:outline-none focus:ring-2 focus:ring-accent-amber/50 placeholder:text-foreground/30 disabled:opacity-50 transition-all font-sans"
+              className="flex-1 bg-foreground/[0.04] border border-foreground/[0.08] text-foreground rounded-full pl-5 pr-14 py-4 focus:outline-none focus:ring-2 focus:ring-accent-amber/40 placeholder:text-foreground/25 disabled:opacity-50 transition-all font-sans text-sm"
             />
             <button
               type="submit"
               aria-label="Send message"
               disabled={!inputText.trim() || store.isAiTyping}
-              className="absolute right-2 p-2 bg-foreground text-background rounded-full hover:scale-105 disabled:opacity-30 disabled:hover:scale-100 transition-all"
+              className="absolute right-12 p-2.5 bg-foreground text-background rounded-full hover:scale-105 disabled:opacity-20 disabled:hover:scale-100 transition-all"
             >
-              <Send className="h-5 w-5 ml-0.5" />
+              <Send className="h-4 w-4" />
+            </button>
+            {/* Mic icon — tap to return to voice mode */}
+            <button
+              type="button"
+              aria-label="Switch to voice mode"
+              onClick={() => {
+                store.setMode('voice')
+                setInputText('')
+              }}
+              className="shrink-0 p-3 rounded-full border border-foreground/[0.08] bg-foreground/[0.03] text-foreground/40 hover:text-foreground/70 hover:border-foreground/20 transition-all"
+            >
+              <Mic className="h-4 w-4" />
             </button>
           </form>
         </div>
@@ -963,124 +997,25 @@ export default function FormSession({
 
   if (store.mode === 'review') {
     return (
-      <main className="max-w-2xl mx-auto py-12 px-6 min-h-[100dvh] flex flex-col">
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="flex-1">
-          <header className="mb-10">
-            <h1 className="text-3xl font-serif font-medium tracking-tight mb-2">Review your answers</h1>
-            <p className="text-foreground/60">We've extracted this from our conversation. Feel free to edit before submitting.</p>
-          </header>
-          <div className="space-y-6 flex-1 pr-1 pb-10">
-            {fields.map((field) => {
-              const val = store.answers[field.id] || ''
-              const isFileField = field.field_type === 'file'
-              const isImageUrl = isFileField && /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(val)
-              const isVideoUrl = isFileField && /\.(mp4|mov|webm|ogg)$/i.test(val)
-
-              return (
-                <div key={field.id} className="bg-foreground/[0.02] border border-foreground/5 p-5 border-l-4 border-l-accent-sage rounded-r-2xl">
-                  <label className="block text-sm font-medium text-foreground/70 mb-2">{field.label}</label>
-                  {isFileField && val ? (
-                    <div className="space-y-2">
-                      {isImageUrl ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img src={val} alt="Uploaded file" className="max-h-40 rounded-xl object-cover border border-foreground/10" />
-                      ) : isVideoUrl ? (
-                        <video src={val} controls className="max-h-40 w-full rounded-xl border border-foreground/10" />
-                      ) : (
-                        <a
-                          href={val}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-2 text-accent-amber font-medium text-sm hover:opacity-80 transition-opacity"
-                        >
-                          <ExternalLink className="h-4 w-4" />
-                          View uploaded file
-                        </a>
-                      )}
-                      <p className="text-xs text-foreground/30 truncate">{val}</p>
-                    </div>
-                  ) : field.field_type === 'mcq' && field.options?.length ? (
-                    <div className="flex flex-wrap gap-2">
-                      {field.options.map((opt: string) => (
-                        <button
-                          key={opt}
-                          onClick={() => store.setAnswer(field.id, opt)}
-                          className={`px-4 py-1.5 rounded-full text-sm font-medium border transition-all ${
-                            val === opt
-                              ? 'bg-accent-amber text-black border-accent-amber'
-                              : 'bg-foreground/[0.03] border-foreground/10 hover:border-foreground/20'
-                          }`}
-                        >
-                          {opt}
-                        </button>
-                      ))}
-                    </div>
-                  ) : field.field_type === 'textarea' ? (
-                    <textarea
-                      value={val}
-                      onChange={(e) => store.setAnswer(field.id, e.target.value)}
-                      className="w-full bg-transparent border-b border-foreground/10 focus:border-foreground pb-1 focus:outline-none resize-none font-medium"
-                      rows={3}
-                    />
-                  ) : (
-                    <input
-                      value={val}
-                      onChange={(e) => store.setAnswer(field.id, e.target.value)}
-                      type={field.field_type === 'number' ? 'number' : field.field_type === 'email' ? 'email' : 'text'}
-                      className="w-full bg-transparent border-b border-foreground/10 focus:border-foreground pb-1 focus:outline-none font-medium"
-                    />
-                  )}
-                </div>
-              )
-            })}
-          </div>
-        </motion.div>
-
-        <div className="pt-6 pb-6 sticky bottom-0 bg-background/90 backdrop-blur-md shadow-[0_-20px_30px_rgba(0,0,0,0.05)]">
-          {submitError && (
-            <div className="mb-3 flex items-center gap-2 text-red-400 text-sm bg-red-500/10 border border-red-500/20 rounded-2xl px-4 py-3">
-              <WifiOff className="h-4 w-4 shrink-0" />
-              <span>{submitError}</span>
-            </div>
-          )}
-          <button
-            onClick={handleSubmitForm}
-            disabled={submitting}
-            className="w-full flex items-center justify-center gap-2 rounded-full bg-foreground px-8 py-4 text-base font-semibold text-background hover:scale-[1.02] transition-transform disabled:opacity-50 disabled:hover:scale-100"
-          >
-            {submitting ? 'Submitting securely...' : <><CheckCircle2 className="h-5 w-5" /> Submit Form</>}
-          </button>
-        </div>
-      </main>
+      <ReviewScreen
+        form={form}
+        fields={fields}
+        answers={store.answers}
+        onAnswerChange={(id, v) => store.setAnswer(id, v)}
+        onSubmit={handleSubmitForm}
+        submitting={submitting}
+        submitError={submitError}
+      />
     )
   }
 
   if (store.mode === 'success') {
     return (
-      <main className="min-h-[100dvh] flex flex-col items-center justify-center p-6 bg-background">
-        <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="text-center max-w-md">
-          <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-accent-sage/10 mb-6 text-accent-sage">
-            <CheckCircle2 className="h-10 w-10" />
-          </div>
-          <h2 className="text-3xl font-serif tracking-tight mb-4">All done!</h2>
-          <p className="text-foreground/70">Your answers have been securely submitted to the creator of "{form.title}".</p>
-
-          <div className="mt-10 p-6 rounded-2xl bg-accent-amber/10 border border-accent-amber/20 text-left">
-            <p className="text-sm font-medium text-foreground/60 uppercase tracking-wider mb-2">Forms are dead.</p>
-            <p className="text-lg font-serif font-medium text-foreground mb-4">
-              Build your own conversational AI form — free forever.
-            </p>
-            <a
-              href="/?ref=form_completion"
-              className="inline-flex items-center gap-2 bg-accent-amber text-black text-sm font-semibold px-5 py-2.5 rounded-full hover:opacity-90 transition-opacity"
-            >
-              Create Yours <ExternalLink className="h-4 w-4" />
-            </a>
-          </div>
-
-          <p className="mt-6 text-xs text-foreground/30 font-medium tracking-wide uppercase">Powered by Voca</p>
-        </motion.div>
-      </main>
+      <SuccessScreen
+        form={form}
+        fields={fields}
+        answers={store.answers}
+      />
     )
   }
 

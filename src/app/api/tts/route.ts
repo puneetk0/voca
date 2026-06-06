@@ -10,45 +10,39 @@ const ratelimit = redis ? new Ratelimit({
   limiter: Ratelimit.slidingWindow(500, "1 h"),
 }) : null
 
-
-
-// Converts plain AI text into SSML with natural pacing.
-// Hard cap is enforced by slicing at a sentence boundary, not a raw character
-// index — the old slice(0, 300) could cut mid-tag and produce malformed XML
-// that Google TTS would either reject or mangle.
-function buildSSML(text: string): string {
-  // Strip markdown that Gemini occasionally sneaks in despite instructions
+// Strips markdown and truncates at a sentence boundary before 280 chars.
+// Shared between Sarvam (plain text) and Google TTS (wrapped in SSML).
+function cleanText(text: string): string {
   let t = text
     .replace(/\*\*/g, '')
     .replace(/\*/g, '')
     .replace(/`/g, '')
-    .replace(/—/g, ', ') // em-dash → comma pause (prompt now bans em-dashes, but be safe)
+    .replace(/—/g, ', ')
 
-  // Safe truncation: find the last sentence boundary before 280 chars.
-  // 280 leaves headroom for SSML tags without pushing past TTS API limits.
   if (t.length > 280) {
-    // Try to break at a sentence end
     const breakPoints = [...t.matchAll(/[.!?]\s/g)]
-    const lastBreak = breakPoints.reverse().find(m => (m.index ?? 0) < 280)
+    const lastBreak = [...breakPoints].reverse().find(m => (m.index ?? 0) < 280)
     if (lastBreak && lastBreak.index !== undefined) {
       t = t.slice(0, lastBreak.index + 1)
     } else {
-      // No sentence boundary found — break at last space before 280
       const lastSpace = t.lastIndexOf(' ', 280)
       t = lastSpace > 0 ? t.slice(0, lastSpace) : t.slice(0, 280)
     }
   }
 
-  // HD voices like Chirp3 handle their own expressiveness and prosody.
-  // Explicit <break> and <prosody> tags confuse their intonation model,
-  // causing robotic, disconnected jumps on words like "Okay" or "Got it."
+  return t
+}
 
-  return `<speak>${t}</speak>`
+// HD voices like Chirp3 handle their own expressiveness. Explicit prosody tags
+// confuse their intonation model, so we only wrap in <speak>.
+function buildSSML(text: string): string {
+  return `<speak>${cleanText(text)}</speak>`
 }
 
 export async function POST(req: Request) {
   try {
-    const { formId, text } = await req.json()
+    const { formId, text, language } = await req.json()
+    const lang: 'hi' | 'en' = language === 'en' ? 'en' : 'hi'
 
     if (!formId || !text) {
       return NextResponse.json({ error: 'Missing formId or text' }, { status: 400 })
@@ -69,6 +63,40 @@ export async function POST(req: Request) {
       .single()
     if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
 
+    // Priority 1: Sarvam AI — built for Indian English, warm and natural.
+    // Configured via SARVAM_API_KEY env var (no per-user key needed for testing).
+    const sarvamKey = process.env.SARVAM_API_KEY
+    if (sarvamKey) {
+      const sarvamRes = await fetch('https://api.sarvam.ai/text-to-speech', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'api-subscription-key': sarvamKey,
+        },
+        body: JSON.stringify({
+          inputs: [cleanText(text)],
+          target_language_code: lang === 'en' ? 'en-IN' : 'hi-IN',
+          speaker: 'anushka',
+          model: 'bulbul:v2',
+          pitch: 0,
+          pace: 1.05,
+          loudness: 1.5,
+          enable_preprocessing: true,
+        }),
+      })
+
+      if (sarvamRes.ok) {
+        const sarvamData = await sarvamRes.json()
+        const audioContent = sarvamData?.audios?.[0]
+        if (audioContent) {
+          return NextResponse.json({ audioContent, format: 'wav' })
+        }
+      } else {
+        console.error('[TTS] Sarvam error:', sarvamRes.status, await sarvamRes.text().catch(() => ''))
+      }
+    }
+
+    // Priority 2: Google Cloud TTS — falls back if Sarvam not configured or failed.
     const { data: keys } = await supabaseAdmin
       .from('user_keys')
       .select('google_tts_key')
@@ -79,32 +107,20 @@ export async function POST(req: Request) {
       return NextResponse.json({ fallback: true })
     }
 
-    const ssmlPayload = buildSSML(text)
-
     const googleRes = await fetch(
       `https://texttospeech.googleapis.com/v1/text:synthesize?key=${keys.google_tts_key}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          input: { ssml: ssmlPayload },
+          input: { ssml: buildSSML(text) },
           voice: {
             languageCode: 'hi-IN',
-            // Neural2-C: warm, conversational Indian English male voice.
-            // Journey voices are better but require v1beta1 endpoint.
-            // If you upgrade to v1beta1 later, switch to en-IN-Journey-D (male)
-            // or en-IN-Journey-F (female) for noticeably more natural output.
-            // My choices - Algenib, Charon,Orus
             name: 'hi-IN-Chirp3-HD-Charon',
           },
           audioConfig: {
             audioEncoding: 'MP3',
-            // 1.1 is slightly faster than natural but not rushed.
-            // Neural2 voices at default 1.0 can sound slightly slow for
-            // conversational back-and-forth; 1.1 feels more natural for chat.
             speakingRate: 0.95,
-            // Slight downward pitch — Neural2-C's default pitch is slightly
-            // high; -1.0 brings it closer to natural male register.
             pitch: 0.0,
             volumeGainDb: 1.5,
           },
@@ -119,7 +135,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ fallback: true, error: 'Failed to synthesize speech' })
     }
 
-    return NextResponse.json({ audioContent: googleData.audioContent })
+    return NextResponse.json({ audioContent: googleData.audioContent, format: 'mp3' })
 
   } catch (err: any) {
     console.error('TTS API error:', err)

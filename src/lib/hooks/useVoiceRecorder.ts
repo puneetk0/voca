@@ -1,17 +1,12 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 
 // --- VAD Constants ---
-// Tightened from 3500ms → 1800ms. 3.5s felt broken; 1.8s is snappy but
-// still forgiving enough for natural speech pauses mid-sentence.
-const SILENCE_THRESHOLD = 12          // baseline floor (RMS out of ~128)
-const MAX_SILENCE_MS = 2800          // 1.8s pause → auto-stop
-const VAD_INTERVAL_MS = 80            // check every 80ms (was 100ms, slightly more responsive)
-const NOISE_CALIBRATION_MS = 600      // first 600ms = ambient noise sampling
-// Multiplier reduced from 1.5 → 1.25. 1.5 was too generous in noisy environments
-// (fans, AC, street noise) — it pushed the floor so high that normal speech
-// barely crossed it, making the silence timer never reset properly.
+const SILENCE_THRESHOLD = 12
+const MAX_SILENCE_MS = 1800
+const VAD_INTERVAL_MS = 80
+const NOISE_CALIBRATION_MS = 600
 const FLOOR_MULTIPLIER = 1.25
-const FLOOR_MAX = 32                  // hard cap — prevents runaway floor in very noisy rooms
+const FLOOR_MAX = 32
 
 export function useVoiceRecorder(
   onTranscription: (text: string, audioBlob: Blob, confidence: number) => void,
@@ -21,6 +16,9 @@ export function useVoiceRecorder(
   const [isProcessing, setIsProcessing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [stream, setStream] = useState<MediaStream | null>(null)
+  // vadVolume: 0–1 normalised amplitude above the calibrated noise floor.
+  // Only > 0 when human speech is detected — drives waveform visibility.
+  const [vadVolume, setVadVolume] = useState(0)
 
   const mediaRecorder = useRef<MediaRecorder | null>(null)
   const audioChunks = useRef<BlobPart[]>([])
@@ -212,15 +210,19 @@ export function useVoiceRecorder(
             return
           }
 
-          // Phase 2: Silence detection
+          // Phase 2: Silence detection + expose normalised volume for waveform
           if (currentVol < noiseFloorRef.current) {
             silenceTimerRef.current += VAD_INTERVAL_MS
+            setVadVolume(0) // below noise floor = silence
             if (silenceTimerRef.current >= MAX_SILENCE_MS) {
               console.debug('[VAD] Silence detected — stopping')
               stopRecording()
             }
           } else {
             silenceTimerRef.current = 0
+            // Normalize: 0 at noise floor, 1 at 4× floor (typical speech peak)
+            const normalised = Math.min((currentVol - noiseFloorRef.current) / (noiseFloorRef.current * 3), 1)
+            setVadVolume(normalised)
           }
         }, VAD_INTERVAL_MS)
 
@@ -253,5 +255,5 @@ export function useVoiceRecorder(
     }
   }, [clearVAD])
 
-  return { startRecording, stopRecording, isRecording, isProcessing, error, stream }
+  return { startRecording, stopRecording, isRecording, isProcessing, error, stream, vadVolume }
 }
