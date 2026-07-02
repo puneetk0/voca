@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
+import { createClient } from '@/lib/supabase/server'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -17,7 +18,7 @@ function cleanText(text: string): string {
     .replace(/\*\*/g, '')
     .replace(/\*/g, '')
     .replace(/`/g, '')
-    .replace(/—/g, ', ')
+    .replace(/[—–]/g, ', ')
 
   if (t.length > 280) {
     const breakPoints = [...t.matchAll(/[.!?]\s/g)]
@@ -33,40 +34,45 @@ function cleanText(text: string): string {
   return t
 }
 
-// HD voices like Chirp3 handle their own expressiveness. Explicit prosody tags
-// confuse their intonation model, so we only wrap in <speak>.
-function buildSSML(text: string): string {
-  return `<speak>${cleanText(text)}</speak>`
-}
-
 export async function POST(req: Request) {
   try {
     const { formId, text, language } = await req.json()
     const lang: 'hi' | 'en' = language === 'en' ? 'en' : 'hi'
 
     if (!formId || !text) {
-      return NextResponse.json({ error: 'Missing formId or text' }, { status: 400 })
+      return NextResponse.json({ error: 'Missing formId or text', code: 'bad_request' }, { status: 400 })
     }
 
     if (ratelimit) {
       const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '127.0.0.1'
       const { success } = await ratelimit.limit(`tts_${ip}_${formId}`)
       if (!success) {
-        return NextResponse.json({ error: 'Rate limit exceeded' }, { status: 429 })
+        return NextResponse.json({ error: 'Rate limit exceeded', code: 'rate_limited' }, { status: 429 })
       }
     }
 
+    // select('*') stays resilient if migration 0002 hasn't run yet
     const { data: form } = await supabaseAdmin
       .from('forms')
-      .select('user_id')
+      .select('*')
       .eq('id', formId)
       .single()
-    if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
+    if (!form) return NextResponse.json({ error: 'Form not found', code: 'not_found' }, { status: 404 })
+    if (!form.is_active) {
+      // Owner bypass: allow the creator to preview a paused form.
+      const supabase = await createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user || user.id !== form.user_id) {
+        return NextResponse.json({ error: 'This form is closed.', code: 'form_closed' }, { status: 403 })
+      }
+    }
 
     // Priority 1: Sarvam AI — built for Indian English, warm and natural.
     // Configured via SARVAM_API_KEY env var (no per-user key needed for testing).
     const sarvamKey = process.env.SARVAM_API_KEY
     if (sarvamKey) {
+      // Pace tracks the form's tone: measured for professional, brisker for playful.
+      const pace = form.ai_tone === 'professional' ? 1.0 : form.ai_tone === 'playful' ? 1.1 : 1.05
       const sarvamRes = await fetch('https://api.sarvam.ai/text-to-speech', {
         method: 'POST',
         headers: {
@@ -79,7 +85,7 @@ export async function POST(req: Request) {
           speaker: 'anushka',
           model: 'bulbul:v2',
           pitch: 0,
-          pace: 1.05,
+          pace,
           loudness: 1.5,
           enable_preprocessing: true,
         }),
@@ -96,47 +102,9 @@ export async function POST(req: Request) {
       }
     }
 
-    // Priority 2: Google Cloud TTS — falls back if Sarvam not configured or failed.
-    const { data: keys } = await supabaseAdmin
-      .from('user_keys')
-      .select('google_tts_key')
-      .eq('user_id', form.user_id)
-      .single()
-
-    const effectiveGoogleTTSKey = keys?.google_tts_key || process.env.GOOGLE_TTS_KEY || null
-    if (!effectiveGoogleTTSKey) {
-      return NextResponse.json({ fallback: true })
-    }
-
-    const googleRes = await fetch(
-      `https://texttospeech.googleapis.com/v1/text:synthesize?key=${effectiveGoogleTTSKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          input: { ssml: buildSSML(text) },
-          voice: {
-            languageCode: 'hi-IN',
-            name: 'hi-IN-Chirp3-HD-Charon',
-          },
-          audioConfig: {
-            audioEncoding: 'MP3',
-            speakingRate: 0.95,
-            pitch: 0.0,
-            volumeGainDb: 1.5,
-          },
-        }),
-      },
-    )
-
-    const googleData = await googleRes.json()
-
-    if (!googleRes.ok) {
-      console.error('Google TTS Error:', googleData)
-      return NextResponse.json({ fallback: true, error: 'Failed to synthesize speech' })
-    }
-
-    return NextResponse.json({ audioContent: googleData.audioContent, format: 'mp3' })
+    // No premium voice available — the client degrades to the browser's built-in
+    // speech, then to captions mode. (Google Cloud TTS was removed.)
+    return NextResponse.json({ fallback: true })
 
   } catch (err: any) {
     console.error('TTS API error:', err)

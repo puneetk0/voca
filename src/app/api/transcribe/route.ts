@@ -4,26 +4,17 @@ import { createClient } from '@/lib/supabase/server'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
+// Whisper/Sarvam transcription can take a few seconds on longer clips.
+export const maxDuration = 30
+
 const url = process.env.UPSTASH_REDIS_REST_URL
 const redis = url && url.startsWith('http') ? Redis.fromEnv() : null
+// 200/hr: each answered question = 1 transcription, and shared IPs (campus
+// wifi, offices) can host many respondents at once.
 const ratelimit = redis ? new Ratelimit({
   redis,
-  limiter: Ratelimit.slidingWindow(50, "1 h"),
+  limiter: Ratelimit.slidingWindow(200, "1 h"),
 }) : null
-
-// Maps MIME types to Google STT encoding strings.
-// Google STT v1p1beta1 requires an explicit encoding field — it can't
-// always sniff the container format from the raw audio bytes alone.
-function getMimeEncoding(mimeType: string): string {
-  if (mimeType.includes('mp4') || mimeType.includes('m4a') || mimeType.includes('aac')) {
-    return 'MP3' // Google STT treats AAC-in-MP4 as MP3 for recognition purposes
-  }
-  if (mimeType.includes('ogg')) {
-    return 'OGG_OPUS'
-  }
-  // Default: webm/opus — most Chrome/Firefox/Android recordings
-  return 'WEBM_OPUS'
-}
 
 export async function POST(req: Request) {
   try {
@@ -34,7 +25,10 @@ export async function POST(req: Request) {
     const clientMimeType = (formData.get('mimeType') as string | null) ?? ''
 
     if (!file) {
-      return NextResponse.json({ error: 'Missing audio' }, { status: 400 })
+      return NextResponse.json({ error: 'Missing audio', code: 'bad_request' }, { status: 400 })
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      return NextResponse.json({ error: 'Audio too large (max 10MB)', code: 'bad_request' }, { status: 413 })
     }
 
     if (ratelimit) {
@@ -42,13 +36,13 @@ export async function POST(req: Request) {
       const { success } = await ratelimit.limit(`transcribe_${ip}_${formId ?? 'admin'}`)
       if (!success) {
         return NextResponse.json(
-          { error: "You're going a bit fast — please wait a moment before continuing." },
+          { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },
           { status: 429 },
         )
       }
     }
 
-    let keys: { groq_key?: string | null; google_tts_key?: string } | null = null
+    let keys: { groq_key?: string | null } | null = null
 
     if (formId) {
       const { data: form } = await supabaseAdmin
@@ -56,20 +50,20 @@ export async function POST(req: Request) {
         .select('user_id')
         .eq('id', formId)
         .single()
-      if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
+      if (!form) return NextResponse.json({ error: 'Form not found', code: 'not_found' }, { status: 404 })
       const { data } = await supabaseAdmin
         .from('user_keys')
-        .select('groq_key, google_tts_key')
+        .select('groq_key')
         .eq('user_id', form.user_id)
         .single()
       keys = data
     } else {
       const supabase = await createClient()
       const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+      if (!user) return NextResponse.json({ error: 'Unauthorized', code: 'bad_request' }, { status: 401 })
       const { data } = await supabaseAdmin
         .from('user_keys')
-        .select('groq_key, google_tts_key')
+        .select('groq_key')
         .eq('user_id', user.id)
         .single()
       keys = data
@@ -77,8 +71,6 @@ export async function POST(req: Request) {
 
     // Fall back to platform env var keys when user hasn't configured their own
     const effectiveGroqKey = keys?.groq_key || process.env.GROQ_KEY || null
-    const effectiveGoogleSTTKey = keys?.google_tts_key || process.env.GOOGLE_TTS_KEY || null
-
     const groqKeyList = [
       effectiveGroqKey,
       process.env.GROQ_KEY_2,
@@ -86,21 +78,20 @@ export async function POST(req: Request) {
     ].filter(Boolean) as string[]
 
     const hasGroq = groqKeyList.length > 0
-    const hasGoogleSTT = !!effectiveGoogleSTTKey
+    const hasSarvam = !!process.env.SARVAM_API_KEY
 
-    if (!hasGroq && !hasGoogleSTT) {
-      return NextResponse.json({ error: 'No transcription keys configured.' }, { status: 400 })
+    if (!hasGroq && !hasSarvam) {
+      return NextResponse.json({ error: 'No transcription keys configured.', code: 'no_keys' }, { status: 400 })
     }
+
+    const ext = clientMimeType.includes('mp4') ? 'mp4'
+      : clientMimeType.includes('ogg') ? 'ogg'
+        : 'webm'
 
     // --- GROQ WHISPER PATH (PRIMARY) ---
     if (hasGroq) {
       try {
         const groqData = new FormData()
-
-        // Determine filename extension — Groq requires a filename to sniff format
-        const ext = clientMimeType.includes('mp4') ? 'mp4'
-          : clientMimeType.includes('ogg') ? 'ogg'
-            : 'webm'
         groqData.append('file', file, `audio.${ext}`)
         groqData.append('model', 'whisper-large-v3-turbo')
         groqData.append('response_format', 'verbose_json')
@@ -111,8 +102,6 @@ export async function POST(req: Request) {
           'prompt',
           'Transcribe this form response. Speaker uses Indian English or Hinglish. Common words: okay, yes, no, actually, basically, na, yaar, theek hai.',
         )
-
-        // groqKeyList is built above the gate check
 
         let sttDone = false
         for (let ki = 0; ki < groqKeyList.length; ki++) {
@@ -129,8 +118,8 @@ export async function POST(req: Request) {
           }
           if (!groqRes.ok) {
             console.error('Groq STT error:', groqJson)
-            if (!hasGoogleSTT) throw new Error(groqJson.error?.message || 'Groq transcription failed')
-            console.warn('[STT] Groq failed, falling back to Google...')
+            if (!hasSarvam) throw new Error(groqJson.error?.message || 'Groq transcription failed')
+            console.warn('[STT] Groq failed, falling back to Sarvam...')
             break
           }
           // Success
@@ -142,55 +131,39 @@ export async function POST(req: Request) {
         }
         if (sttDone) return // satisfied above — TypeScript needs this
       } catch (groqErr: any) {
-        if (!hasGoogleSTT) throw groqErr
-        console.warn('[STT] Groq exception, falling back to Google:', groqErr.message)
+        if (!hasSarvam) throw groqErr
+        console.warn('[STT] Groq exception, falling back to Sarvam:', groqErr.message)
       }
     }
 
-    // --- GOOGLE CLOUD STT PATH (FALLBACK) ---
-    if (hasGoogleSTT) {
+    // --- SARVAM STT PATH (FALLBACK) — strong on Hinglish / code-mixing ---
+    if (hasSarvam) {
       try {
-        const arrayBuffer = await file.arrayBuffer()
-        const audioBase64 = Buffer.from(arrayBuffer).toString('base64')
-        const encoding = getMimeEncoding(clientMimeType || (file as File).type || '')
+        const sarvamData = new FormData()
+        sarvamData.append('file', file, `audio.${ext}`)
+        sarvamData.append('model', 'saarika:v2.5')
+        sarvamData.append('language_code', 'unknown') // auto-detect (handles Hinglish)
 
-        const sttUrl = `https://speech.googleapis.com/v1p1beta1/speech:recognize?key=${effectiveGoogleSTTKey}`
-
-        const googleRes = await fetch(sttUrl, {
+        const sarvamRes = await fetch('https://api.sarvam.ai/speech-to-text', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            config: {
-              encoding,
-              languageCode: 'en-IN',
-              alternativeLanguageCodes: ['hi-IN'],
-              enableAutomaticPunctuation: true,
-              enableWordConfidence: true,
-              useEnhanced: true,
-            },
-            audio: { content: audioBase64 },
-          }),
+          headers: { 'api-subscription-key': process.env.SARVAM_API_KEY! },
+          body: sarvamData as unknown as BodyInit,
         })
+        const sarvamJson = await sarvamRes.json()
 
-        const googleJson = await googleRes.json()
-
-        if (!googleRes.ok) {
-          console.error('Google STT fallback error:', googleJson)
-          throw new Error(googleJson.error?.message || 'Google STT fallback failed')
+        if (!sarvamRes.ok) {
+          console.error('Sarvam STT error:', sarvamJson)
+          throw new Error(sarvamJson.error?.message || 'Sarvam transcription failed')
         }
 
-        const result = googleJson.results?.[0]?.alternatives?.[0]
-        return NextResponse.json({ 
-          transcript: result?.transcript ?? '', 
-          confidence: result?.confidence ?? 1.0 
-        })
-      } catch (googleErr: any) {
-        throw googleErr
+        return NextResponse.json({ transcript: sarvamJson.transcript ?? '', confidence: 0.9 })
+      } catch (sarvamErr: any) {
+        throw sarvamErr
       }
     }
 
   } catch (err: any) {
     console.error('Transcription error:', err)
-    return NextResponse.json({ error: err.message }, { status: 500 })
+    return NextResponse.json({ error: err.message, code: 'upstream_down' }, { status: 500 })
   }
 }

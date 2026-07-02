@@ -7,55 +7,35 @@ import { CheckCircle2, XCircle, Loader2 } from 'lucide-react'
 
 type KeyStatus = 'idle' | 'checking' | 'valid' | 'invalid'
 
-export default function SettingsForm({ initialGemini, initialGroq, initialGoogleTTS, initialGcpProjectId, hasPlatformKeys }: { initialGemini: string; initialGroq: string; initialGoogleTTS?: string; initialGcpProjectId?: string; hasPlatformKeys?: boolean }) {
-  const [geminiKey, setGeminiKey] = useState(initialGemini)
+export default function SettingsForm({ initialGroq, hasPlatformKeys }: { initialGroq: string; hasPlatformKeys?: boolean }) {
   const [groqKey, setGroqKey] = useState(initialGroq)
-  const [googleTTSKey, setGoogleTTSKey] = useState(initialGoogleTTS || '')
-  const [gcpProjectId, setGcpProjectId] = useState(initialGcpProjectId || '')
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState('')
-  const [geminiStatus, setGeminiStatus] = useState<KeyStatus>('idle')
   const [groqStatus, setGroqStatus] = useState<KeyStatus>('idle')
-  const [googleTTSStatus, setGoogleTTSStatus] = useState<KeyStatus>('idle')
-  const [geminiError, setGeminiError] = useState('')
   const [groqError, setGroqError] = useState('')
-  const [googleTTSError, setGoogleTTSError] = useState('')
 
   async function handleSave(e: React.FormEvent) {
     e.preventDefault()
     setStatus('loading')
-    setGeminiStatus('checking')
-    setGroqStatus('checking')
-    if (googleTTSKey) setGoogleTTSStatus('checking')
-    else setGoogleTTSStatus('idle')
-
-    setGeminiError('')
     setGroqError('')
-    setGoogleTTSError('')
     setErrorMessage('')
 
-    // Step 1: Pre-flight validation — only validate non-empty fields
-    const needsValidation = geminiKey || groqKey || googleTTSKey
-    if (needsValidation) {
-      const validation = await validateAPIKeys(geminiKey, groqKey, googleTTSKey)
-
-      if (geminiKey) setGeminiStatus(validation.gemini ? 'valid' : 'invalid')
-      if (groqKey) setGroqStatus(validation.groq ? 'valid' : 'invalid')
-      if (googleTTSKey) setGoogleTTSStatus(validation.googleTTS ? 'valid' : 'invalid')
-
-      if (validation.geminiError) setGeminiError(validation.geminiError)
+    // Only validate a non-empty key (empty = fall back to platform keys)
+    if (groqKey) {
+      setGroqStatus('checking')
+      const validation = await validateAPIKeys(groqKey)
+      setGroqStatus(validation.groq ? 'valid' : 'invalid')
       if (validation.groqError) setGroqError(validation.groqError)
-      if (validation.googleTTSError) setGoogleTTSError(validation.googleTTSError)
-
-      if ((geminiKey && !validation.gemini) || (groqKey && !validation.groq) || (googleTTSKey && !validation.googleTTS)) {
+      if (!validation.groq) {
         setStatus('error')
-        setErrorMessage('One or more keys failed validation. Please fix them before saving.')
+        setErrorMessage('Your Groq key failed validation. Fix it before saving.')
         return
       }
+    } else {
+      setGroqStatus('idle')
     }
 
-    // Step 2: Save to DB
-    const result = await saveUserKeys(geminiKey, groqKey, googleTTSKey, gcpProjectId)
+    const result = await saveUserKeys(groqKey)
     if (result?.error) {
       setStatus('error')
       setErrorMessage(result.error)
@@ -84,29 +64,12 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
           <CheckCircle2 className="h-4 w-4 text-accent-sage mt-0.5 shrink-0" />
           <div>
             <p className="font-medium text-accent-sage">Platform keys are active</p>
-            <p className="text-foreground/60 mt-0.5">Your forms work out of the box. Add your own keys below to use your personal API quota.</p>
+            <p className="text-foreground/60 mt-0.5">Your forms work out of the box. Add your own Groq key below to use your personal quota.</p>
           </div>
         </div>
       )}
       <div className="space-y-4 bg-foreground/[0.02] border border-foreground/10 p-6 rounded-2xl">
-        {/* Gemini Key */}
         <div>
-          <div className="flex items-center justify-between mb-2">
-            <label htmlFor="gemini_key" className="block text-sm font-medium">Google Gemini API Key</label>
-            <KeyIndicator status={geminiStatus} error={geminiError} />
-          </div>
-          <input
-            id="gemini_key"
-            type="password"
-            value={geminiKey}
-            onChange={(e) => { setGeminiKey(e.target.value); setGeminiStatus('idle') }}
-            placeholder="AIzaSy..."
-            className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
-          />
-        </div>
-
-        {/* Groq Key */}
-        <div className="pt-4 border-t border-foreground/10">
           <div className="flex items-center justify-between mb-2">
             <label htmlFor="groq_key" className="block text-sm font-medium">Groq API Key</label>
             <KeyIndicator status={groqStatus} error={groqError} />
@@ -119,27 +82,9 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
             placeholder="gsk_..."
             className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
           />
-        </div>
-        {/* Google Cloud Section */}
-        <div className="pt-4 border-t border-foreground/10 space-y-4">
-          <p className="text-xs font-medium uppercase tracking-wider text-foreground/40">Google Cloud (Optional — Premium Voice &amp; Transcription)</p>
-
-          {/* Google TTS / STT API Key */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label htmlFor="google_tts_key" className="block text-sm font-medium">GCP API Key</label>
-              <KeyIndicator status={googleTTSStatus} error={googleTTSError} />
-            </div>
-            <input
-              id="google_tts_key"
-              type="password"
-              value={googleTTSKey}
-              onChange={(e) => { setGoogleTTSKey(e.target.value); setGoogleTTSStatus('idle') }}
-              placeholder="AIzaSy..."
-              className="mt-1 block w-full rounded-xl border-0 bg-background py-3 px-4 text-foreground shadow-sm ring-1 ring-inset ring-foreground/10 focus:ring-2 focus:ring-inset focus:ring-accent-sage sm:text-sm"
-            />
-          </div>
-
+          <p className="mt-2 text-xs text-foreground/45">
+            Powers conversation and transcription. Get one free at console.groq.com. Voice output uses the platform&apos;s Sarvam voice.
+          </p>
         </div>
       </div>
 
@@ -148,7 +93,7 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
       )}
       {status === 'success' && (
         <div className="p-3 rounded-lg bg-accent-sage/10 text-accent-sage text-sm flex items-center gap-2">
-          <CheckCircle2 className="h-4 w-4" /> Keys validated and updated securely.
+          <CheckCircle2 className="h-4 w-4" /> Key validated and saved securely.
         </div>
       )}
 
@@ -158,7 +103,7 @@ export default function SettingsForm({ initialGemini, initialGroq, initialGoogle
         className="flex items-center gap-2 justify-center rounded-full bg-accent-amber px-8 py-3 text-sm font-semibold text-black shadow-sm hover:opacity-90 disabled:opacity-50 transition-all"
       >
         {status === 'loading' && <Loader2 className="h-4 w-4 animate-spin" />}
-        {status === 'loading' ? 'Validating & Saving...' : 'Update Keys'}
+        {status === 'loading' ? 'Validating & Saving...' : 'Update Key'}
       </button>
     </form>
   )

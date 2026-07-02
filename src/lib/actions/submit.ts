@@ -7,6 +7,7 @@ export async function submitResponse(formData: FormData) {
 
   const formId = formData.get('formId') as string
   const inputMethod = formData.get('inputMethod') as string
+  const sessionId = (formData.get('sessionId') as string | null) || null
   const answers = JSON.parse(formData.get('answers') as string)
   const sentiments = JSON.parse(formData.get('sentiments') as string || '{}')
   const history = JSON.parse(formData.get('history') as string)
@@ -31,7 +32,7 @@ export async function submitResponse(formData: FormData) {
 
   // 2. Fetch form info + valid fields in parallel
   const [formResult, fieldsResult] = await Promise.all([
-    supabase.from('forms').select('user_id, title').eq('id', formId).single(),
+    supabase.from('forms').select('user_id, title, email_notifications').eq('id', formId).single(),
     supabase.from('fields').select('id, label').eq('form_id', formId),
   ])
 
@@ -89,8 +90,31 @@ export async function submitResponse(formData: FormData) {
   })
   if (transcriptErr) console.error('Error inserting transcript:', transcriptErr)
 
-  // 5. Email notification — fire and forget, don't block the response
-  if (formResult.data) {
+  // 4b. Mark the session complete (drop-off analytics). Duration is computed
+  //     from the server-recorded started_at to avoid trusting the client clock.
+  if (sessionId) {
+    try {
+      const { data: sess } = await supabase
+        .from('form_sessions')
+        .select('started_at, total_fields')
+        .eq('id', sessionId)
+        .single()
+      const startedMs = sess?.started_at ? new Date(sess.started_at).getTime() : null
+      await supabase.from('form_sessions').update({
+        completed_at: new Date().toISOString(),
+        duration_ms: startedMs ? Date.now() - startedMs : null,
+        response_id: response.id,
+        input_method: inputMethod,
+        last_field_index: sess?.total_fields ?? null,
+      }).eq('id', sessionId)
+    } catch (sessErr) {
+      console.error('[Session] Failed to mark complete:', sessErr)
+    }
+  }
+
+  // 5. Email notification — fire and forget, don't block the response.
+  //    Respect the per-form toggle (defaults to on when the column is null).
+  if (formResult.data && formResult.data.email_notifications !== false) {
     const { user_id, title } = formResult.data
     supabase.auth.admin.getUserById(user_id).then(({ data }) => {
       const email = data?.user?.email
@@ -105,5 +129,5 @@ export async function submitResponse(formData: FormData) {
     }).catch(err => console.error('[Email] Failed to send response notification:', err))
   }
 
-  return { success: true }
+  return { success: true, responseId: response.id }
 }

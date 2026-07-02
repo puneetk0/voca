@@ -12,34 +12,63 @@ import { toast } from 'sonner'
 import ReviewScreen from './ReviewScreen'
 import SuccessScreen from './SuccessScreen'
 import Waveform from '@/components/voice/Waveform'
+import { ConfirmationPill } from '@/components/form/ConfirmationPill'
+import { parseDevice } from '@/lib/device'
+import { startFormSession, updateSessionProgress } from '@/lib/actions/sessions'
+import { mapErrorToUi, type ApiErrorCode } from '@/lib/api-errors'
 
 const GHOST_MESSAGES = [
-  "Taking a moment — bear with me.",
-  "Processing that — just a second.",
-  "Almost there, one moment.",
+  'Taking a moment, bear with me.',
+  'Processing that, just a second.',
+  'Almost there, one moment.',
 ]
 
-const CONVERSE_TIMEOUT_MS = 6000
+// Generous budget: the server's worst case is ~8-12s (capped provider
+// timeouts). Aborting earlier only wastes the in-flight work and burns
+// rate limits with duplicate requests.
+const CONVERSE_TIMEOUT_MS = 15000
+const SLOW_HINT_MS = 4000
 
-/** Fetch /api/converse with AbortController timeout */
-async function fetchConverse(body: object): Promise<{ data?: any; timedOut?: boolean; error?: string }> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), CONVERSE_TIMEOUT_MS)
+/** One in-flight converse turn. `userAborted` distinguishes an intentional
+ *  cancel (correction pill / newer input) from a timeout abort. */
+type ConverseTurn = { controller: AbortController; userAborted: boolean }
+
+type ConverseResult = {
+  data?: any
+  timedOut?: boolean
+  aborted?: boolean
+  error?: string
+  code?: ApiErrorCode
+}
+
+/** Fetch /api/converse with a hard timeout and a "this is slow" callback. */
+async function fetchConverse(body: object, turn: ConverseTurn, onSlow?: () => void): Promise<ConverseResult> {
+  const timer = setTimeout(() => turn.controller.abort(), CONVERSE_TIMEOUT_MS)
+  const slowTimer = onSlow ? setTimeout(onSlow, SLOW_HINT_MS) : null
   try {
     const res = await fetch('/api/converse', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-      signal: controller.signal,
+      signal: turn.controller.signal,
     })
-    clearTimeout(timer)
-    const data = await res.json()
-    if (!res.ok) return { error: data.error || 'API error' }
+    let data: any
+    try {
+      data = await res.json()
+    } catch {
+      // Non-JSON body (proxy 504 pages etc.) — treat as provider failure
+      return { error: 'Bad gateway', code: 'upstream_down' }
+    }
+    if (!res.ok) return { error: data.error || 'API error', code: data.code as ApiErrorCode | undefined }
     return { data }
   } catch (err: any) {
+    if (err.name === 'AbortError') {
+      return turn.userAborted ? { aborted: true } : { timedOut: true }
+    }
+    return { error: err.message, code: 'upstream_down' }
+  } finally {
     clearTimeout(timer)
-    if (err.name === 'AbortError') return { timedOut: true }
-    return { error: err.message }
+    if (slowTimer) clearTimeout(slowTimer)
   }
 }
 
@@ -48,24 +77,35 @@ export default function FormSession({
   fields,
   prefills = {},
   userEmail,
+  isPreview = false,
 }: {
   form: any
   fields: any[]
   prefills?: Record<string, string>
   userEmail?: string
+  isPreview?: boolean
 }) {
   const store = useConversationStore()
   const [inputText, setInputText] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [submissionId, setSubmissionId] = useState<string | null>(null)
+  const [submissionTime, setSubmissionTime] = useState<string | null>(null)
   const [isUploading, setIsUploading] = useState(false)
   const [voiceState, setVoiceState] = useState<VoiceState>('idle')
-  const [selectedLang, setSelectedLang] = useState<'hi' | 'en'>('hi')
+  // Session language starts from the form's configured default (English unless
+  // the creator chose Hindi); the respondent can still toggle on the choice screen.
+  const defaultLang: 'hi' | 'en' = form.default_language === 'hi' ? 'hi' : 'en'
+  const [selectedLang, setSelectedLang] = useState<'hi' | 'en'>(defaultLang)
   const [showTextHint, setShowTextHint] = useState(false)
   const textInputRef = useRef<HTMLInputElement>(null)
   // Ref that mirrors voiceState — allows reading current value inside async closures
   // without stale-closure bugs (React state is always the captured render value)
   const voiceStateRef = useRef<VoiceState>('idle')
+
+  // Session tracking (drop-off / timing / device analytics)
+  const sessionIdRef = useRef<string | null>(null)
+  const maxFieldReachedRef = useRef(0)
 
   // Tracks the most recently confirmed answer to show between questions
   const [lastConfirmedAnswer, setLastConfirmedAnswer] = useState<{ label: string; value: string } | null>(null)
@@ -81,7 +121,18 @@ export default function FormSession({
   // isHandlingTranscriptRef: true while a converse call is in-flight, blocks duplicate VAD fires
   const isHandlingTranscriptRef = useRef(false)
 
-  const { audioRef, fillerAudioRef, fillerFormatRef, languageRef, isSpeakingRef, playSmartAudio, killAudio, playChime, switchToEnglishFillers } = useTTS(form.id, setVoiceState)
+  // Turn machinery: each converse call is a numbered turn holding its own
+  // AbortController. A newer turn aborts the previous one; stale resolutions
+  // are discarded by comparing turn ids. Also powers the correction pill.
+  const turnCounterRef = useRef(0)
+  const activeConverseRef = useRef<ConverseTurn | null>(null)
+
+  // Correction window: "You said: X" with a drain timer, shown WHILE the AI
+  // processes in parallel. Resolves true (confirmed) or false (user editing).
+  const [pendingTranscript, setPendingTranscript] = useState<{ text: string; fieldIndex: number; userMsgId: string } | null>(null)
+  const pillResolveRef = useRef<((ok: boolean) => void) | null>(null)
+
+  const { audioRef, fillerAudioRef, fillerFormatRef, languageRef, isSpeakingRef, captionsMode, playSmartAudio, killAudio, playChime, switchFillers } = useTTS(form.id, setVoiceState, defaultLang)
 
 
   const ANSWERS_KEY = `voca_answers_${form.id}`
@@ -100,14 +151,17 @@ export default function FormSession({
       const emailField = fields.find(f => f.field_type === 'email')
       if (emailField) store.setAnswer(emailField.id, userEmail)
     }
-    // Restore in-progress answers from localStorage
-    try {
-      const saved = localStorage.getItem(ANSWERS_KEY)
-      if (saved) {
-        const parsed = JSON.parse(saved) as Record<string, string>
-        Object.entries(parsed).forEach(([id, val]) => store.setAnswer(id, val))
-      }
-    } catch { }
+    // Restore in-progress answers from localStorage (not in preview — the
+    // owner's test run must not pollute real drafts)
+    if (!isPreview) {
+      try {
+        const saved = localStorage.getItem(ANSWERS_KEY)
+        if (saved) {
+          const parsed = JSON.parse(saved) as Record<string, string>
+          Object.entries(parsed).forEach(([id, val]) => store.setAnswer(id, val))
+        }
+      } catch { }
+    }
     return () => {
       window.speechSynthesis.cancel()
       if (audioRef.current) {
@@ -118,15 +172,25 @@ export default function FormSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.id])
 
-  // Persist answers to localStorage on every change
+  // Persist answers to localStorage on every change (skipped in preview)
   useEffect(() => {
-    if (Object.keys(store.answers).length === 0) return
+    if (isPreview || Object.keys(store.answers).length === 0) return
     try { localStorage.setItem(ANSWERS_KEY, JSON.stringify(store.answers)) } catch { }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.answers])
 
   // Keep voiceStateRef in sync so async callbacks always read the current value
   useEffect(() => { voiceStateRef.current = voiceState }, [voiceState])
+
+  // Track the furthest question reached, for drop-off analytics (monotonic).
+  // Preview runs never create a session, so sessionIdRef stays null there.
+  useEffect(() => {
+    const idx = store.currentFieldIndex
+    if (sessionIdRef.current && idx > maxFieldReachedRef.current) {
+      maxFieldReachedRef.current = idx
+      updateSessionProgress(sessionIdRef.current, idx)
+    }
+  }, [store.currentFieldIndex])
 
   // Epic 5: Track form abandonment for PostHog
   useEffect(() => {
@@ -146,11 +210,12 @@ export default function FormSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Replace the custom ConnectionLostToast component with sonner.
+  // Transient-failure toast (config errors never reach here — they render
+  // the full-screen fatalError state instead).
   useEffect(() => {
     if (store.connectionLost) {
-      toast.error('AI is taking a nap.', {
-        description: 'Retrying... or type your answer below.',
+      toast.error('Hit a snag.', {
+        description: 'Tap the orb to retry, or type your answer below.',
         duration: 6000,
       })
     }
@@ -183,55 +248,60 @@ export default function FormSession({
     store.setConnectionLost(false)
     if (mode === 'voice') setVoiceState(prev => prev === 'speaking' ? 'speaking' : 'thinking')
 
-    const result = await fetchConverse({
-      formId: form.id,
-      currentFieldIndex: fieldIndex,
-      history: store.history,
-      userMessage,
-      userEmail,
-      currentLanguage: languageRef.current,
-      ...(extraContext ? { extraContext } : {}),
-      confidence,
-    })
+    // Newest input wins: cancel any in-flight turn, claim a fresh turn id.
+    if (activeConverseRef.current) {
+      activeConverseRef.current.userAborted = true
+      activeConverseRef.current.controller.abort()
+    }
+    const turnId = ++turnCounterRef.current
+    const turn: ConverseTurn = { controller: new AbortController(), userAborted: false }
+    activeConverseRef.current = turn
 
-    if (result.timedOut) {
-      const ghost = GHOST_MESSAGES[Math.floor(Math.random() * GHOST_MESSAGES.length)]
-      store.addMessage({ id: Date.now().toString(), role: 'ai', text: ghost })
-      store.setIsAiTyping(false)
-
-      // Silent retry
-      const retry = await fetchConverse({
+    const result = await fetchConverse(
+      {
         formId: form.id,
         currentFieldIndex: fieldIndex,
         history: store.history,
         userMessage,
         userEmail,
         currentLanguage: languageRef.current,
+        ...(extraContext ? { extraContext } : {}),
         confidence,
-      })
+      },
+      turn,
+      // Slow hint: soften the wait without aborting or re-requesting.
+      () => {
+        const ghost = GHOST_MESSAGES[Math.floor(Math.random() * GHOST_MESSAGES.length)]
+        useConversationStore.getState().replaceMessage('__ai_thinking__', { id: '__ai_thinking__', role: 'ai', text: ghost })
+      },
+    )
 
-      if (retry.data) {
-        result.data = retry.data
-      } else {
-        store.setConnectionLost(true)
-        store.setIsAiTyping(false)
-        isHandlingTranscriptRef.current = false
-        if (mode === 'voice') {
-          setVoiceState('error')
-          setShowTextHint(true)
-          isSpeakingRef.current = false
-        }
-        return
-      }
-    }
+    // Superseded by a newer turn (user corrected / typed something new) — drop silently.
+    if (result.aborted || turnId !== turnCounterRef.current) return
+    if (activeConverseRef.current === turn) activeConverseRef.current = null
 
-    if (result.error || !result.data) {
-      store.setConnectionLost(true)
+    if (result.timedOut || result.error || !result.data) {
+      const ui = mapErrorToUi(result.timedOut ? 'timeout' : result.code)
       store.setIsAiTyping(false)
       isHandlingTranscriptRef.current = false
+      isSpeakingRef.current = false
+
+      if (ui.fatal) {
+        // Unrecoverable (no keys / closed / deleted) — block the session with
+        // a clear explanation instead of an endless retry loop.
+        killAudio()
+        store.setFatalError(result.code ?? 'not_found')
+        return
+      }
+
+      if (result.code === 'rate_limited') {
+        toast.error(ui.title, { description: ui.description, duration: 5000 })
+      } else {
+        store.setConnectionLost(true)
+      }
       if (mode === 'voice') {
         setVoiceState('error')
-        isSpeakingRef.current = false
+        setShowTextHint(true)
       }
       return
     }
@@ -239,11 +309,11 @@ export default function FormSession({
     const data = result.data
     store.setConnectionLost(false)
 
-    // Language switch: if AI signals English, lock in for the rest of the session
-    // and clear Hindi fillers so we don't play Hindi audio before an English response
-    if (data.language === 'en' && languageRef.current === 'hi') {
-      languageRef.current = 'en'
-      switchToEnglishFillers()
+    // Language switch (symmetric): when the AI signals a switch, lock it in
+    // and swap fillers so we never play wrong-language audio before a reply.
+    if ((data.language === 'en' || data.language === 'hi') && data.language !== languageRef.current) {
+      languageRef.current = data.language
+      switchFillers(data.language)
     }
 
     if (data.extractedValues && typeof data.extractedValues === 'object') {
@@ -290,7 +360,7 @@ export default function FormSession({
     } else {
       isSpeakingRef.current = false
     }
-  }, [form.id, store, fields, userEmail])
+  }, [form.id, store, fields, userEmail, killAudio])
 
   // --- VOICE TRANSCRIPT HANDLER ---
   const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream, vadVolume } = useVoiceRecorder(
@@ -323,12 +393,18 @@ export default function FormSession({
       if (audioBlob.size > 0) store.setAudioBlob(currentField.id, audioBlob)
 
       // Optimistic UI: user message + thinking placeholder
-      store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Voice] ${cleanTranscript}` })
+      const userMsgId = Date.now().toString()
+      store.addMessage({ id: userMsgId, role: 'user', text: `[Voice] ${cleanTranscript}` })
       store.addMessage({
         id: '__ai_thinking__',
         role: 'ai',
         text: getThinkingLabel(currentField?.field_type || 'text', cleanTranscript),
       })
+
+      // CORRECTION WINDOW: show "You said: X" with a drain timer WHILE the AI
+      // processes in parallel — zero added latency, tap to abort and fix.
+      setPendingTranscript({ text: cleanTranscript, fieldIndex, userMsgId })
+      const pillConfirmed = new Promise<boolean>(res => { pillResolveRef.current = res })
 
       // LATENCY MASKING: Instantly play a random filler right when processing starts
       if (fillerAudioRef.current.length > 0 && audioRef.current) {
@@ -342,16 +418,21 @@ export default function FormSession({
         setVoiceState('thinking')
       }
 
-      // Fire converse — no filler words, visual thinking state handles the wait
+      // Fire converse immediately (parallel with the correction window); the
+      // AI's reply is only played once the pill confirms (drain or explicit).
       await handleConverseResponse(cleanTranscript, fieldIndex, 'voice', (aiMessage, isComplete) => {
-        playSmartAudio(aiMessage, () => {
-          isHandlingTranscriptRef.current = false
-          setVoiceState('idle')
-          if (!isComplete) {
-            if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
-          } else {
-            store.setMode('review')
-          }
+        pillConfirmed.then(ok => {
+          if (!ok) return // user is correcting — this turn's reply is void
+          setPendingTranscript(null)
+          playSmartAudio(aiMessage, () => {
+            isHandlingTranscriptRef.current = false
+            setVoiceState('idle')
+            if (!isComplete) {
+              if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
+            } else {
+              store.setMode('review')
+            }
+          })
         })
       }, undefined, confidence)
 
@@ -359,6 +440,7 @@ export default function FormSession({
       // not the stale closure value captured when this callback was created.
       if (isHandlingTranscriptRef.current && voiceStateRef.current === 'error') {
         isHandlingTranscriptRef.current = false
+        setPendingTranscript(null) // error orb replaces the correction window
       }
     },
     form.id,
@@ -379,11 +461,27 @@ export default function FormSession({
     try {
       const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
       tempStream.getTracks().forEach(t => t.stop())
-    } catch {
-      toast.error("Microphone unavailable.", {
-        description: "No worries — type your answers below.",
-        duration: 4000,
-      })
+    } catch (e: any) {
+      const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent)
+      if (e?.name === 'NotAllowedError') {
+        if (isIOS) {
+          toast.error("Microphone blocked", {
+            description: "Go to Settings → Safari → Microphone to enable access, then reload.",
+            duration: 8000,
+            action: { label: 'Reload', onClick: () => window.location.reload() },
+          })
+        } else {
+          toast.error("Microphone blocked", {
+            description: "Click the lock icon in your browser's address bar to allow microphone access.",
+            duration: 6000,
+          })
+        }
+      } else {
+        toast.error("Microphone unavailable.", {
+          description: "No worries — type your answers below.",
+          duration: 4000,
+        })
+      }
       setShowTextHint(true)
       // Continue in voice mode — TTS still plays, user types their answers
     }
@@ -395,6 +493,16 @@ export default function FormSession({
       : ''
 
     store.addMessage({ id: '__ai_thinking__', role: 'ai', text: 'Setting things up...' })
+
+    // Start a session for drop-off / timing / device analytics (best-effort).
+    // Preview runs are excluded from analytics entirely.
+    if (!isPreview) {
+      try {
+        startFormSession(form.id, parseDevice(navigator.userAgent), fields.length)
+          .then(res => { if (res && 'sessionId' in res && res.sessionId) sessionIdRef.current = res.sessionId })
+          .catch(() => {})
+      } catch { }
+    }
 
     const startFieldIndex = Math.max(0, fields.findIndex(f => !store.answers[f.id]))
 
@@ -432,6 +540,15 @@ export default function FormSession({
   }
 
   async function handleSubmitForm() {
+    // Preview: never write anything — no response, no session, no email.
+    if (isPreview) {
+      setSubmissionId(`preview-${Date.now()}`)
+      setSubmissionTime(new Date().toLocaleString())
+      playChime()
+      store.setMode('success')
+      return
+    }
+
     setSubmitting(true)
     setSubmitError(null)
     try {
@@ -441,6 +558,7 @@ export default function FormSession({
       const formData = new FormData()
       formData.append('formId', form.id)
       formData.append('inputMethod', inputMethod)
+      formData.append('sessionId', sessionIdRef.current ?? '')
       formData.append('answers', JSON.stringify(store.answers))
       formData.append('sentiments', JSON.stringify(store.sentiments))
       formData.append('history', JSON.stringify(store.history))
@@ -449,8 +567,10 @@ export default function FormSession({
         formData.append(`audio_${fieldId}`, audioBlob as Blob, `${fieldId}.webm`)
       })
 
-      await submitResponse(formData)
+      const result = await submitResponse(formData)
       try { localStorage.removeItem(ANSWERS_KEY) } catch { }
+      if (result.responseId) setSubmissionId(result.responseId)
+      setSubmissionTime(new Date().toLocaleString())
       playChime()
       store.setMode('success')
     } catch (e: any) {
@@ -486,13 +606,48 @@ export default function FormSession({
 
   // ==================== RENDERS ====================
 
+  // Owner-only preview: fixed strip so it's visible in every mode.
+  const previewBanner = isPreview ? (
+    <div className="fixed top-0 inset-x-0 z-[60] bg-accent-amber text-black text-center text-xs font-semibold py-1.5">
+      Preview mode. Responses won&apos;t be saved.
+    </div>
+  ) : null
+
+  // Unrecoverable error — a clear, honest dead-end beats an infinite retry loop.
+  if (store.fatalError) {
+    const ui = mapErrorToUi(store.fatalError)
+    return (
+      <main className="min-h-[100dvh] flex flex-col items-center justify-center p-6 bg-background">
+        <div className="text-center max-w-md">
+          <h1 className="text-2xl font-semibold tracking-tight mb-4">{ui.title}</h1>
+          <div className="p-6 rounded-2xl bg-foreground/[0.02] border border-foreground/10 text-foreground/60 mb-6 font-medium">
+            {ui.description}
+          </div>
+          <p className="text-xs text-foreground/30 font-medium tracking-wide uppercase">Powered by Voca</p>
+        </div>
+      </main>
+    )
+  }
+
   if (store.mode === 'choice') {
     return (
       <main className="min-h-[100dvh] flex flex-col items-center justify-center p-6 bg-background">
+        {previewBanner}
         <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-2xl w-full text-center space-y-10">
           <div>
             <h1 className="text-4xl sm:text-5xl font-serif font-medium tracking-tight mb-4">{form.title}</h1>
             <p className="text-xl text-foreground/60 max-w-lg mx-auto">{form.description}</p>
+            {form.welcome_message && (
+              <p className="ai-text mt-5 text-base text-foreground/45 max-w-md mx-auto">
+                &ldquo;{form.welcome_message}&rdquo;
+              </p>
+            )}
+            {/* Time estimate: ~12s per spoken answer */}
+            <p className="mt-5 text-sm text-foreground/40 flex items-center justify-center gap-2">
+              <span>{fields.length} question{fields.length !== 1 ? 's' : ''}</span>
+              <span className="h-1 w-1 rounded-full bg-foreground/20" />
+              <span>about {Math.max(1, Math.round((fields.length * 12) / 60))} min</span>
+            </p>
           </div>
 
           {/* Language toggle */}
@@ -501,7 +656,7 @@ export default function FormSession({
             {(['hi', 'en'] as const).map(lang => (
               <button
                 key={lang}
-                onClick={() => { setSelectedLang(lang); languageRef.current = lang }}
+                onClick={() => { setSelectedLang(lang); languageRef.current = lang; switchFillers(lang) }}
                 className={`px-4 py-1.5 rounded-full text-sm font-sans transition-all ${
                   selectedLang === lang
                     ? 'bg-foreground text-background shadow-sm'
@@ -554,6 +709,13 @@ export default function FormSession({
 
     return (
       <main className="min-h-[100dvh] flex flex-col items-center justify-between p-6 pt-safe pb-safe bg-background overflow-hidden" role="main" aria-label={`Voice form: ${form.title}`}>
+        {previewBanner}
+        {/* Captions mode: audio pipeline failed repeatedly — read-along instead */}
+        {captionsMode && (
+          <div className="w-full max-w-sm rounded-xl bg-accent-amber/[0.08] border border-accent-amber/20 px-4 py-2 text-xs text-accent-amber text-center">
+            Audio unavailable, reading mode is on. Your mic still works.
+          </div>
+        )}
         {/* Progress indicator */}
         <div className="w-full max-w-sm pt-4">
           <div className="flex items-center justify-between mb-1.5">
@@ -666,6 +828,61 @@ export default function FormSession({
               )}
             </motion.button>
           </div>
+
+          {/* Correction window: what we heard, tap to fix while the AI thinks */}
+          <AnimatePresence>
+            {pendingTranscript && (
+              <div className="w-full max-w-xs">
+                <ConfirmationPill
+                  key={pendingTranscript.userMsgId}
+                  fieldLabel="You said"
+                  value={pendingTranscript.text}
+                  fieldType="text"
+                  durationMs={2500}
+                  onAutoConfirm={() => {
+                    pillResolveRef.current?.(true)
+                    pillResolveRef.current = null
+                  }}
+                  onEditStart={() => {
+                    // Abort the in-flight turn and silence everything — the
+                    // user is taking over to correct what we heard.
+                    if (activeConverseRef.current) {
+                      activeConverseRef.current.userAborted = true
+                      activeConverseRef.current.controller.abort()
+                    }
+                    killAudio()
+                    pillResolveRef.current?.(false)
+                    pillResolveRef.current = null
+                    isHandlingTranscriptRef.current = false
+                    store.setIsAiTyping(false)
+                    setVoiceState('idle')
+                  }}
+                  onEdit={(newValue) => {
+                    const corrected = newValue.trim()
+                    const { fieldIndex, userMsgId } = pendingTranscript
+                    setPendingTranscript(null)
+                    if (!corrected) return
+                    // Swap the optimistic voice message for the corrected text
+                    // and resend as a fresh turn (text — no re-transcription).
+                    store.replaceMessage(userMsgId, { id: userMsgId, role: 'user', text: `[Voice] ${corrected}` })
+                    isHandlingTranscriptRef.current = true
+                    setVoiceState('thinking')
+                    handleConverseResponse(corrected, fieldIndex, 'voice', (aiMessage, isComplete) => {
+                      playSmartAudio(aiMessage, () => {
+                        isHandlingTranscriptRef.current = false
+                        setVoiceState('idle')
+                        if (!isComplete) {
+                          if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
+                        } else {
+                          store.setMode('review')
+                        }
+                      })
+                    })
+                  }}
+                />
+              </div>
+            )}
+          </AnimatePresence>
 
           {/* Confirmed answer pill — shown for 4s after answer is captured */}
           <AnimatePresence>
@@ -789,24 +1006,29 @@ export default function FormSession({
 
                   const nextIdx = store.currentFieldIndex
                   isHandlingTranscriptRef.current = true
-                  await handleConverseResponse(
-                    `[System: User uploaded file. Name: ${file.name}, URL: ${publicUrl}]`,
-                    nextIdx,
-                    'voice',
-                    (aiMessage, isComplete) => {
-                      playSmartAudio(aiMessage, () => {
-                        isHandlingTranscriptRef.current = false
-                        setVoiceState('idle')
-                        const newIdx = useConversationStore.getState().currentFieldIndex
-                        if (!isComplete) {
-                          // Only start mic if next field is NOT a file field
-                          if (shouldAutoListen(newIdx)) startRecording()
-                        } else {
-                          store.setMode('review')
-                        }
-                      })
-                    }
-                  )
+                  try {
+                    await handleConverseResponse(
+                      `[System: User uploaded file. Name: ${file.name}, URL: ${publicUrl}]`,
+                      nextIdx,
+                      'voice',
+                      (aiMessage, isComplete) => {
+                        playSmartAudio(aiMessage, () => {
+                          isHandlingTranscriptRef.current = false
+                          setVoiceState('idle')
+                          const newIdx = useConversationStore.getState().currentFieldIndex
+                          if (!isComplete) {
+                            // Only start mic if next field is NOT a file field
+                            if (shouldAutoListen(newIdx)) startRecording()
+                          } else {
+                            store.setMode('review')
+                          }
+                        })
+                      }
+                    )
+                  } catch {
+                    isHandlingTranscriptRef.current = false
+                    setVoiceState('idle')
+                  }
                 }}
               />
             </label>
@@ -850,25 +1072,34 @@ export default function FormSession({
 
   if (store.mode === 'review') {
     return (
-      <ReviewScreen
-        form={form}
-        fields={fields}
-        answers={store.answers}
-        onAnswerChange={(id, v) => store.setAnswer(id, v)}
-        onSubmit={handleSubmitForm}
-        submitting={submitting}
-        submitError={submitError}
-      />
+      <>
+        {previewBanner}
+        <ReviewScreen
+          form={form}
+          fields={fields}
+          answers={store.answers}
+          onAnswerChange={(id, v) => store.setAnswer(id, v)}
+          onSubmit={handleSubmitForm}
+          submitting={submitting}
+          submitError={submitError}
+        />
+      </>
     )
   }
 
   if (store.mode === 'success') {
     return (
-      <SuccessScreen
-        form={form}
-        fields={fields}
-        answers={store.answers}
-      />
+      <>
+        {previewBanner}
+        <SuccessScreen
+          form={form}
+          fields={fields}
+          answers={store.answers}
+          submissionId={submissionId}
+          submissionTime={submissionTime}
+          redirectUrl={isPreview ? null : form.redirect_url}
+        />
+      </>
     )
   }
 

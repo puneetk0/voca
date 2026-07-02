@@ -1,32 +1,68 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import { callFastFirst } from '@/lib/llm'
+import { Ratelimit } from '@upstash/ratelimit'
+import { Redis } from '@upstash/redis'
+
+// Schema generation is non-interactive — allow the full retry ladder.
+export const maxDuration = 60
+
+const url = process.env.UPSTASH_REDIS_REST_URL
+const redis = url && url.startsWith('http') ? Redis.fromEnv() : null
+const ratelimit = redis
+  ? new Ratelimit({ redis, limiter: Ratelimit.slidingWindow(10, '1 h') })
+  : null
 
 export async function POST(req: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
   if (!user) {
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    return NextResponse.json({ error: 'Unauthorized', code: 'bad_request' }, { status: 401 })
   }
 
-  const { data: keys } = await supabase.from('user_keys').select('gemini_key').eq('user_id', user.id).single()
-
-  if (!keys?.gemini_key) {
-    return NextResponse.json({ error: 'Gemini API Key not configured in Onboarding' }, { status: 400 })
+  // Rate limit: 10 form creations per user per hour
+  if (ratelimit) {
+    const { success } = await ratelimit.limit(`create_form_${user.id}`)
+    if (!success) {
+      return NextResponse.json({ error: 'Too many forms created. Try again later.', code: 'rate_limited' }, { status: 429 })
+    }
   }
 
-  const { prompt } = await req.json()
+  const body = await req.json()
+  const { prompt, tone, context } = body as { prompt?: string; tone?: string; context?: string }
 
-  if (!prompt) {
-    return NextResponse.json({ error: 'Prompt is required' }, { status: 400 })
+  if (!prompt || typeof prompt !== 'string') {
+    return NextResponse.json({ error: 'Prompt is required', code: 'bad_request' }, { status: 400 })
+  }
+  if (prompt.length > 2000) {
+    return NextResponse.json({ error: 'Prompt too long (max 2000 characters)', code: 'bad_request' }, { status: 400 })
+  }
+
+  const { data: keys } = await supabase
+    .from('user_keys')
+    .select('groq_key')
+    .eq('user_id', user.id)
+    .single()
+
+  const groqKeys = [
+    keys?.groq_key,
+    process.env.GROQ_KEY,
+    process.env.GROQ_KEY_2,
+    process.env.GROQ_KEY_3,
+  ].filter(Boolean) as string[]
+  const effectiveCerebrasKey = process.env.CEREBRAS_API_KEY || null
+
+  if (groqKeys.length === 0 && !effectiveCerebrasKey && !process.env.GEMINI_KEY) {
+    return NextResponse.json({ error: 'No AI keys configured. Add a Groq key in Settings.', code: 'no_keys' }, { status: 400 })
   }
 
   try {
-    const genAI = new GoogleGenerativeAI(keys.gemini_key)
-    const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" })
+    const toneNote = tone ? `\nThe form's conversational tone will be "${tone}".` : ''
+    const contextNote = context ? `\nBackground from the creator (use it to sharpen the title, description, and welcome): ${context}` : ''
 
     const systemInstruction = `You are a form schema generation assistant. Convert the user's natural language description into a structured JSON form schema.
+${toneNote}${contextNote}
 
 AVAILABLE FIELD TYPES — choose the most appropriate one for each field:
 - "text"     → Short single-line answer (name, city, company, etc.)
@@ -47,11 +83,13 @@ RULES:
 3. If the prompt mentions choosing between a fixed set of items → use "mcq".
 4. Never use "text" when "mcq" or "number" is more appropriate.
 5. "required" should be true unless the question is clearly optional.
+6. "welcome_message" is ONE short, warm spoken sentence the AI voice will open the conversation with. It should reference what the form is about. No emojis, no markdown, no questions.
 
 OUTPUT — strictly valid JSON only, no markdown fences:
 {
   "title": "Form Title",
   "description": "Short description",
+  "welcome_message": "Hi! Thanks for taking a minute to share your thoughts on our beta.",
   "fields": [
     { "label": "Full Name", "field_type": "text", "required": true },
     { "label": "Are you currently employed?", "field_type": "mcq", "required": true, "options": ["Yes", "No"] },
@@ -60,19 +98,23 @@ OUTPUT — strictly valid JSON only, no markdown fences:
   ]
 }`
 
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: systemInstruction + "\n\nUser's form description: " + prompt }] }],
-      generationConfig: {
-        responseMimeType: "application/json",
-      }
-    })
+    const responseText = await callFastFirst(
+      groqKeys,
+      effectiveCerebrasKey,
+      systemInstruction,
+      "User's form description: " + prompt,
+      { perCallTimeoutMs: 10000, geminiRetries: 2 },
+    )
 
-    const responseText = result.response.text()
-    const schema = JSON.parse(responseText)
+    const cleaned = responseText
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim()
+    const schema = JSON.parse(cleaned)
 
     return NextResponse.json({ schema })
   } catch (err: any) {
-    console.error('Gemini API Error:', err)
-    return NextResponse.json({ error: err.message || 'Failed to generate form schema' }, { status: 500 })
+    console.error('Create-form generation error:', err)
+    return NextResponse.json({ error: 'Failed to generate form. Please try again.', code: 'upstream_down' }, { status: 502 })
   }
 }

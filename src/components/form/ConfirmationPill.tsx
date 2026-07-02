@@ -9,12 +9,15 @@ interface ConfirmationPillProps {
   value: string
   fieldType: string
   onAutoConfirm: () => void
-  onEdit: () => void
+  /** Called with the corrected value when the user confirms their edit. */
+  onEdit: (newValue: string) => void
+  /** Called the moment the user taps to edit — cancel in-flight work here. */
+  onEditStart?: () => void
   durationMs?: number
 }
 
 /**
- * Appears immediately when a value is extracted.
+ * Appears immediately when a value is captured.
  * A 2px progress line depletes over durationMs (default 2000ms).
  * Auto-confirms when the line hits zero.
  * Tapping the pill cancels auto-confirm and opens edit mode.
@@ -25,6 +28,7 @@ export function ConfirmationPill({
   fieldType,
   onAutoConfirm,
   onEdit,
+  onEditStart,
   durationMs = 2000,
 }: ConfirmationPillProps) {
   const [confirmed, setConfirmed] = useState(false)
@@ -66,7 +70,7 @@ export function ConfirmationPill({
           onClick={() => {
             if (timerRef.current) clearTimeout(timerRef.current)
             setEditing(false)
-            onEdit()  // caller will re-inject the edited value into AI conversation
+            onEdit(editValue.trim())  // caller re-injects the corrected value into the conversation
           }}
           aria-label="Confirm edit"
           className="shrink-0 p-2 rounded-full bg-accent-amber text-black hover:opacity-90 transition-opacity"
@@ -88,6 +92,7 @@ export function ConfirmationPill({
       <button
         onClick={() => {
           if (timerRef.current) clearTimeout(timerRef.current)
+          onEditStart?.()
           setEditing(true)
         }}
         className="w-full text-left relative overflow-hidden rounded-xl border border-foreground/[0.08] bg-foreground/[0.03] px-4 py-3 hover:border-foreground/[0.15] transition-colors group"

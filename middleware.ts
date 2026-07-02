@@ -48,17 +48,19 @@ export async function middleware(request: NextRequest) {
 
     // 2. Must be on the allowlist (if one is configured)
     // Set ALLOWED_ADMIN_EMAILS=email1@x.com,email2@x.com in .env.local
-    // If the var is empty / not set, any authenticated user passes (dev mode).
+    // In production, if this var is not set, access is denied by default.
+    // In development (NODE_ENV !== 'production'), empty list allows any auth user.
     const allowedEmails = (process.env.ALLOWED_ADMIN_EMAILS ?? '')
       .split(',')
       .map((e) => e.trim().toLowerCase())
       .filter(Boolean)
 
-    if (
-      allowedEmails.length > 0 &&
-      !allowedEmails.includes(user.email?.toLowerCase() ?? '')
-    ) {
-      // Redirect to landing page, not login — the user IS logged in, just not invited
+    const isProd = process.env.NODE_ENV === 'production'
+    const isAllowed = allowedEmails.length === 0
+      ? !isProd  // dev: allow; prod: deny
+      : allowedEmails.includes(user.email?.toLowerCase() ?? '')
+
+    if (!isAllowed) {
       return NextResponse.redirect(new URL('/?access=denied', request.url))
     }
   }

@@ -20,7 +20,7 @@ export async function authenticateWithPassword(formData: FormData) {
     if (!data.session) {
       return { error: 'Account created safely! However, you must check your email to verify (or disable "Confirm Email" in your Supabase Auth Settings to login instantly).' }
     }
-    return { success: true }
+    return { success: true, isNewUser: true }
   }
 
   const { error } = await supabase.auth.signInWithPassword({ email, password })

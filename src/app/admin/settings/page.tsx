@@ -1,6 +1,5 @@
 import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
-import { saveUserKeys } from '@/lib/actions/keys'
 import { Key } from 'lucide-react'
 import SettingsForm from './_components/SettingsForm'
 
@@ -12,11 +11,11 @@ export default async function SettingsPage() {
 
   const { data: keys } = await supabase
     .from('user_keys')
-    .select('gemini_key, groq_key, google_tts_key, gcp_project_id')
+    .select('groq_key')
     .eq('user_id', user.id)
     .single()
 
-  const hasPlatformKeys = !!(process.env.GROQ_KEY || process.env.GROQ_KEY_2)
+  const hasPlatformKeys = !!(process.env.GROQ_KEY || process.env.GROQ_KEY_2 || process.env.CEREBRAS_API_KEY)
 
   return (
     <main className="max-w-3xl mx-auto py-12 px-6">
@@ -28,10 +27,7 @@ export default async function SettingsPage() {
       </div>
 
       <SettingsForm
-        initialGemini={keys?.gemini_key || ''}
         initialGroq={keys?.groq_key || ''}
-        initialGoogleTTS={keys?.google_tts_key || ''}
-        initialGcpProjectId={keys?.gcp_project_id || ''}
         hasPlatformKeys={hasPlatformKeys}
       />
     </main>

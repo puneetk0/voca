@@ -1,8 +1,13 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
-import { callFastFirst } from '@/lib/gemini'
+import { createClient } from '@/lib/supabase/server'
+import { callFastFirst } from '@/lib/llm'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
+
+// The interactive latency budget (~8-12s worst case) needs more than the
+// default serverless duration on some plans.
+export const maxDuration = 30
 
 const url = process.env.UPSTASH_REDIS_REST_URL
 const redis = url && url.startsWith('http') ? Redis.fromEnv() : null
@@ -68,6 +73,25 @@ FIELD TYPE: File Upload (Document, Resume, Image, etc.)
   }
 }
 
+// Per-form personality presets. The creator picks one; it swaps the "voice"
+// of the interviewer without touching the extraction/format machinery.
+export type AiTone = 'professional' | 'friendly' | 'playful'
+
+const TONE_PRESETS: Record<AiTone, string> = {
+  professional: `- Courteous, concise, competent — a sharp executive assistant. No slang, no exclamation marks, no jokes.
+- Acknowledge answers briefly and precisely ("Noted." / "Understood.") before moving on.`,
+  friendly: `- Warm, genuine, conversational — a friendly colleague, never a customer service agent.
+- NEVER start with filler words like: "Perfect", "Got it", "Okay", "Hmm", "Right", "Great", "Awesome". Jump straight in.`,
+  playful: `- Light, witty, energetic — a fun host keeping things moving. A dash of humor is welcome, but keep every reply short.
+- Vary your energy: tease gently, celebrate good answers, never repeat the same joke pattern twice.`,
+}
+
+type Persona = {
+  aiContext: string | null
+  aiTone: AiTone
+  welcomeMessage: string | null
+}
+
 // The system prompt is the core of what makes Voca feel like a conversation
 // rather than a form. Key design decisions:
 //
@@ -91,7 +115,8 @@ function buildSystemPrompt(
   currentFieldLabel: string,
   userEmail?: string,
   currentFieldOptions?: string[],
-  currentLanguage: 'hi' | 'en' = 'hi',
+  currentLanguage: 'hi' | 'en' = 'en',
+  persona: Persona = { aiContext: null, aiTone: 'friendly', welcomeMessage: null },
 ): string {
   let fieldRules = getFieldRules(fieldType, userEmail)
 
@@ -122,25 +147,35 @@ FIELD TYPE: Multiple Choice
 
   const isHindi = currentLanguage === 'hi'
 
+  const contextBlock = persona.aiContext?.trim()
+    ? `
+CREATOR CONTEXT (background from the form creator — this is what you KNOW; use it to answer the respondent's questions and make transitions specific, never invent beyond it):
+${persona.aiContext.trim()}
+`
+    : ''
+
   return `You are having a warm, flowing conversation to help someone fill out a form called "${formTitle}".
 
 You are not a bot reading fields. You are an empathetic, active listener who genuinely cares about what the person is saying — not just extracting data. You already have context from the whole conversation; use it to make every transition feel human, not mechanical.
 
 FORM OVERVIEW (all fields, for your context):
 ${fieldList}
-
+${contextBlock}
 YOUR CURRENT TASK: Extract the answer for "${currentFieldLabel}"
 
 LANGUAGE: ${isHindi ? 'Hindi' : 'English'}
 ${isHindi ? `- Respond in natural, conversational Hindi (Devanagari script) in spokenMessage. Simple, everyday Hindi — like a helpful friend, not a formal document.
-- SWITCH DETECTION: If the user explicitly asks to switch to English ("English mein baat karo", "switch to English", "please speak English", "can you speak English" or any clear English switch request), set "language" to "en" in your JSON response and respond in English from this turn.` : `- Respond in warm Indian English. The user switched from Hindi — continue in English for the rest of this conversation.`}
+- SWITCH DETECTION: If the user explicitly asks to switch to English ("English mein baat karo", "switch to English", "please speak English" or any clear English switch request), set "language" to "en" in your JSON response and respond in English from this turn.` : `- Respond in warm Indian English.
+- SWITCH DETECTION: If the user explicitly asks for Hindi ("Hindi mein baat karo", "speak Hindi", "हिंदी में बोलो" or any clear Hindi switch request), set "language" to "hi" in your JSON response and respond in Hindi (Devanagari) from this turn.`}
 - extractedValues MUST always be in English/Latin script, never Hindi script. Transliterate: "पुनीत" → "Puneet".
 - displayedMessage MUST always be in English regardless of language.
 
 OPENING HOOK (ONLY on the very first turn — when conversation history is empty):
-Open with exactly 2 sentences:
+${persona.welcomeMessage?.trim()
+  ? `Open with this exact welcome from the form creator (translate it naturally to ${isHindi ? 'Hindi' : 'English'} if it isn't already): "${persona.welcomeMessage.trim()}". Then immediately ask the first field question.`
+  : `Open with exactly 2 sentences:
 1. A warm, contextual greeting that references what this form is about ("${formTitle}"). Sound like a friend, not a customer service agent.
-2. Immediately ask the first field question.
+2. Immediately ask the first field question.`}
 Keep it natural. No word limits. Do NOT mention how long it will take. Do NOT ask about language.
 extractedValues must be {} and nextFieldIndex must be 0.
 
@@ -160,18 +195,18 @@ Analyze the TONE of the user's response, not just the content. Then respond acco
 - EXCITED (enthusiastic): Mirror their energy.
 - POSITIVE/NEUTRAL: Respond naturally.
 
-CONVERSATION STYLE:
-- Warm, genuine, conversational — a friendly colleague, never a customer service agent.
-- NEVER start with filler words like: "Perfect", "Got it", "Okay", "Hmm", "Right", "Great", "Awesome". Jump straight in.
+CONVERSATION STYLE (tone: ${persona.aiTone}):
+${TONE_PRESETS[persona.aiTone]}
 - ${isHindi ? 'Use natural Hindi transitional words sparingly: "अच्छा", "बढ़िया", "ठीक है" — each only once per conversation.' : 'FILLER WORD ROTATION (strict): One acknowledgment per turn, each used only once: ["Love that", "Noted", "Makes sense", "That works", "Good to know", "Appreciated", "Solid"].'}
-- React genuinely. Reference previous answers to make transitions feel connected.
+- REACT TO CONTENT, not just receipt: pick up a specific detail from what they actually SAID and mirror it in 3-6 words before the next question ("Mumbai, nice — big move?"). Never a generic "thanks for sharing".
 - If someone hesitates or rambles, be warm and accepting.
+- PROGRESS: once past the halfway point of the form, briefly acknowledge momentum ONCE ("more than halfway, this is quick") — never mention it again after that.
 
 FORMAT RULES (responses are read aloud — non-negotiable):
 - Zero markdown. No asterisks, lists, headers, bullets. Ever.
 - Maximum ONE question per response. Maximum TWO sentences total.
 - Never end with more than one question mark.
-- No em dashes — use a comma or period instead.
+- No em dashes or en dashes. Use a comma or period instead.
 
 ${fieldRules}
 
@@ -214,7 +249,7 @@ export async function POST(req: Request) {
       const { success } = await ratelimit.limit(`converse_${ip}`)
       if (!success) {
         return NextResponse.json(
-          { error: "You're going a bit fast — please wait a moment before continuing." },
+          { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },
           { status: 429 },
         )
       }
@@ -222,32 +257,48 @@ export async function POST(req: Request) {
 
     // Perf: fetch form + fields in parallel — only keys fetch depends on form.user_id
     const [formResult, fieldsResult] = await Promise.all([
-      supabaseAdmin.from('forms').select('user_id, title').eq('id', formId).single(),
+      // select('*') keeps this resilient if migration 0002 hasn't run yet —
+      // missing personality columns simply come back undefined.
+      supabaseAdmin.from('forms').select('*').eq('id', formId).single(),
       supabaseAdmin.from('fields').select('*').eq('form_id', formId).order('order_index'),
     ])
 
     const form = formResult.data
-    if (!form) return NextResponse.json({ error: 'Form not found' }, { status: 404 })
+    if (!form) return NextResponse.json({ error: 'Form not found', code: 'not_found' }, { status: 404 })
+    if (!form.is_active) {
+      // Owner bypass: allow the creator to preview a paused form.
+      const supabase = await createClient()
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user || user.id !== form.user_id) {
+        return NextResponse.json({ error: 'This form is closed.', code: 'form_closed' }, { status: 403 })
+      }
+    }
 
     const { data: keys } = await supabaseAdmin
       .from('user_keys')
-      .select('gemini_key, groq_key')
+      .select('groq_key')
       .eq('user_id', form.user_id)
       .single()
 
     // Fall back to platform env var keys when user hasn't configured their own
     const effectiveGroqKey = keys?.groq_key || process.env.GROQ_KEY || null
-    const effectiveGeminiKey = keys?.gemini_key || process.env.GEMINI_KEY || null
+    const effectiveCerebrasKey = process.env.CEREBRAS_API_KEY || null
 
     const fields = fieldsResult.data
     if (!fields || fields.length === 0) {
-      return NextResponse.json({ error: 'Form fields not found' }, { status: 404 })
+      return NextResponse.json({ error: 'This form has no questions configured.', code: 'no_fields' }, { status: 422 })
     }
 
     const currentField = fields[currentFieldIndex]
     const isLastField = currentFieldIndex === fields.length - 1
 
-    const lang: 'hi' | 'en' = currentLanguage === 'en' ? 'en' : 'hi'
+    // Client sends the session language explicitly; the form's configured
+    // default is the safety net (English unless the creator chose Hindi).
+    const lang: 'hi' | 'en' = currentLanguage === 'hi' || currentLanguage === 'en'
+      ? currentLanguage
+      : (form.default_language === 'hi' ? 'hi' : 'en')
+
+    const tone: AiTone = form.ai_tone === 'professional' || form.ai_tone === 'playful' ? form.ai_tone : 'friendly'
 
     const systemInstruction = buildSystemPrompt(
       form.title,
@@ -257,6 +308,7 @@ export async function POST(req: Request) {
       userEmail,
       currentField.options ?? undefined,
       lang,
+      { aiContext: form.ai_context ?? null, aiTone: tone, welcomeMessage: form.welcome_message ?? null },
     )
 
     // Keep last 10 turns (5 exchanges) — bumped from 6 to give Gemini more
@@ -278,6 +330,7 @@ export async function POST(req: Request) {
     const userPrompt = [
       extraContext ?? '',
       `Current field: "${currentField.label}" (${currentField.field_type})`,
+      `Progress: question ${currentFieldIndex + 1} of ${fields.length}.`,
       nextFieldContext,
       '',
       'Conversation so far:',
@@ -291,16 +344,27 @@ export async function POST(req: Request) {
       process.env.GROQ_KEY_3,
     ].filter(Boolean) as string[]
 
-    if (groqKeys.length === 0 && !effectiveGeminiKey) {
-      return NextResponse.json({ error: 'No AI keys configured for this form.' }, { status: 400 })
+    if (groqKeys.length === 0 && !effectiveCerebrasKey && !process.env.GEMINI_KEY) {
+      return NextResponse.json({ error: 'No AI keys configured for this form.', code: 'no_keys' }, { status: 400 })
     }
 
-    const responseText = await callFastFirst(
-      groqKeys,
-      effectiveGeminiKey,
-      systemInstruction,
-      userPrompt,
-    )
+    // Tight interactive budget: worst case ~8-12s, safely under the client's 15s.
+    let responseText: string
+    try {
+      responseText = await callFastFirst(
+        groqKeys,
+        effectiveCerebrasKey,
+        systemInstruction,
+        userPrompt,
+        { perCallTimeoutMs: 4000, maxGroqKeys: 2, geminiRetries: 0 },
+      )
+    } catch (llmErr: any) {
+      console.error('[Converse] All LLM providers failed:', llmErr?.message)
+      return NextResponse.json(
+        { error: 'The AI is unavailable right now. Please try again.', code: 'upstream_down' },
+        { status: 502 },
+      )
+    }
 
     let parsed: { extractedValues?: Record<string, string>; extractedValue?: string | null; nextFieldIndex?: number; sentiment?: string; language?: string; spokenMessage: string; displayedMessage: string }
     try {
@@ -364,6 +428,9 @@ export async function POST(req: Request) {
 
   } catch (error: any) {
     console.error('Converse API Error:', error)
-    return NextResponse.json({ error: error.message }, { status: 500 })
+    return NextResponse.json(
+      { error: 'Something went wrong. Please try again.', code: 'upstream_down' },
+      { status: 500 },
+    )
   }
 }

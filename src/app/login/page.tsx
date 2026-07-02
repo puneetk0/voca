@@ -21,7 +21,7 @@ export default function LoginPage() {
       setMessage(res.error)
     } else if (res?.success) {
       setStatus('success')
-      router.push('/admin')
+      router.push((res as any).isNewUser ? '/admin/create' : '/admin')
       router.refresh()
     }
   }

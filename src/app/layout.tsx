@@ -18,8 +18,30 @@ const dmMono = DM_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Voca | Voice-First Form Builder",
-  description: "Structured data collection disguised as a real human conversation.",
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? "https://voca.app"),
+  title: {
+    default: "Voca — It's not a form. It's a conversation.",
+    template: "%s — Voca",
+  },
+  description:
+    "Voca interviews your respondents with a warm AI voice — in English or Hinglish — and turns messy speech into clean, structured data. Higher completion, richer answers.",
+  keywords: [
+    "voice form builder", "AI form", "conversational form", "Typeform alternative",
+    "Google Forms alternative", "Tally alternative", "Hinglish form", "voice survey",
+  ],
+  openGraph: {
+    title: "It's not a form. It's a conversation.",
+    description:
+      "Voca interviews your respondents with a warm AI voice and turns messy speech into clean, structured data.",
+    type: "website",
+    siteName: "Voca",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "It's not a form. It's a conversation.",
+    description:
+      "Voca replaces cold forms with warm AI voice conversations. Higher completion, richer data.",
+  },
 };
 
 export default function RootLayout({

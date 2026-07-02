@@ -1,61 +1,115 @@
 'use client'
 
-import { useRef, useCallback, useEffect } from 'react'
+import { useRef, useCallback, useEffect, useState } from 'react'
 
 export type VoiceState = 'idle' | 'thinking' | 'speaking' | 'listening' | 'transcribing' | 'error'
 
-const HINDI_FILLERS = ["हाँ...", "अच्छा...", "हम्म...", "ठीक है..."]
-const ENGLISH_FILLERS = ["Hmm...", "Okay...", "Right...", "Got it..."]
+const FILLERS: Record<'hi' | 'en', string[]> = {
+  hi: ["हाँ...", "अच्छा...", "हम्म...", "ठीक है..."],
+  en: ["Hmm...", "Okay...", "Right...", "Got it..."],
+}
 
-export function useTTS(formId: string, setVoiceState: (s: VoiceState) => void) {
+const TTS_FETCH_TIMEOUT_MS = 5000
+
+export function useTTS(
+  formId: string,
+  setVoiceState: (s: VoiceState) => void,
+  initialLanguage: 'hi' | 'en' = 'en',
+) {
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const fillerAudioRef = useRef<string[]>([])
   const fillerFormatRef = useRef<string>('mpeg')
-  const englishFillerCacheRef = useRef<string[]>([])
-  const languageRef = useRef<'hi' | 'en'>('hi')
+  const fillerCacheRef = useRef<Record<'hi' | 'en', string[]>>({ hi: [], en: [] })
+  const languageRef = useRef<'hi' | 'en'>(initialLanguage)
   const isSpeakingRef = useRef(false)
 
-  useEffect(() => {
-    const timer = setTimeout(async () => {
-      try {
-        const [hindiResults, englishResults] = await Promise.all([
-          Promise.all(HINDI_FILLERS.map(f =>
-            fetch('/api/tts', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ formId, text: f, language: 'hi' }),
-            }).then(r => r.json())
-          )),
-          Promise.all(ENGLISH_FILLERS.map(f =>
-            fetch('/api/tts', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ formId, text: f, language: 'en' }),
-            }).then(r => r.json())
-          )),
-        ])
-        const first = hindiResults.find(r => r.audioContent && r.format)
-        if (first) fillerFormatRef.current = first.format === 'wav' ? 'wav' : 'mpeg'
-        fillerAudioRef.current = hindiResults.map(r => r.audioContent).filter(Boolean)
-        englishFillerCacheRef.current = englishResults.map(r => r.audioContent).filter(Boolean)
-      } catch { }
-    }, 2000)
-    return () => clearTimeout(timer)
+  // Watchdog: guarantees the onEnd callback ALWAYS fires, even if the audio
+  // element or speechSynthesis silently dies. Without it, isSpeakingRef can
+  // stay true forever and the whole session locks up.
+  const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Captions mode: after repeated total audio failures we stop trying to play
+  // sound and instead give a silent "reading window" so the loop continues.
+  const ttsFailStreakRef = useRef(0)
+  const [captionsMode, setCaptionsMode] = useState(false)
+
+  const fetchFillers = useCallback(async (lang: 'hi' | 'en') => {
+    const results = await Promise.allSettled(
+      FILLERS[lang].map(f =>
+        fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ formId, text: f, language: lang }),
+          signal: AbortSignal.timeout(TTS_FETCH_TIMEOUT_MS + 3000),
+        }).then(r => r.json()),
+      ),
+    )
+    const ok = results
+      .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled' && r.value?.audioContent)
+      .map(r => r.value)
+    if (ok.length > 0 && ok[0].format) {
+      fillerFormatRef.current = ok[0].format === 'wav' ? 'wav' : 'mpeg'
+    }
+    fillerCacheRef.current[lang] = ok.map(r => r.audioContent)
+    return ok.length
   }, [formId])
 
-  const switchToEnglishFillers = useCallback(() => {
-    fillerAudioRef.current = englishFillerCacheRef.current
+  // Prefetch ONLY the session's starting language eagerly (halves the request
+  // burst against the TTS rate limit); the other language loads on switch.
+  useEffect(() => {
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    const timer = setTimeout(async () => {
+      try {
+        const count = await fetchFillers(languageRef.current)
+        fillerAudioRef.current = fillerCacheRef.current[languageRef.current]
+        if (count === 0) {
+          console.warn('[TTS] all filler prefetches failed — latency masking disabled, retrying in 30s')
+          retryTimer = setTimeout(async () => {
+            await fetchFillers(languageRef.current)
+            fillerAudioRef.current = fillerCacheRef.current[languageRef.current]
+          }, 30000)
+        }
+      } catch { }
+    }, 2000)
+    return () => {
+      clearTimeout(timer)
+      if (retryTimer) clearTimeout(retryTimer)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formId])
+
+  /** Swap the active filler set; lazily fetch it if not cached yet. */
+  const switchFillers = useCallback((lang: 'hi' | 'en') => {
+    if (fillerCacheRef.current[lang].length > 0) {
+      fillerAudioRef.current = fillerCacheRef.current[lang]
+    } else {
+      fillerAudioRef.current = [] // don't play wrong-language fillers meanwhile
+      fetchFillers(lang).then(() => {
+        if (languageRef.current === lang) fillerAudioRef.current = fillerCacheRef.current[lang]
+      }).catch(() => { })
+    }
+  }, [fetchFillers])
+
+  const clearWatchdog = useCallback(() => {
+    if (watchdogRef.current) {
+      clearTimeout(watchdogRef.current)
+      watchdogRef.current = null
+    }
   }, [])
 
   const killAudio = useCallback(() => {
+    // Intentional interruption: silence everything WITHOUT firing onEnd —
+    // the caller is starting a new flow and must not get a stale mic-restart.
+    clearWatchdog()
     isSpeakingRef.current = false
     window.speechSynthesis?.cancel()
     if (audioRef.current) {
       audioRef.current.onended = null
+      audioRef.current.onerror = null
       audioRef.current.pause()
       audioRef.current.currentTime = 0
     }
-  }, [])
+  }, [clearWatchdog])
 
   const playChime = useCallback(() => {
     try {
@@ -81,14 +135,60 @@ export function useTTS(formId: string, setVoiceState: (s: VoiceState) => void) {
     isSpeakingRef.current = true
     setVoiceState('speaking')
     window.speechSynthesis?.cancel()
+    clearWatchdog()
     if (audioRef.current) {
       audioRef.current.pause()
       audioRef.current.currentTime = 0
     }
 
-    const handleEnd = () => {
+    // Single-fire finalization: every completion path (natural end, error,
+    // watchdog) funnels through here exactly once.
+    let done = false
+    const finalize = (viaWatchdog = false) => {
+      if (done) return
+      done = true
+      clearWatchdog()
       isSpeakingRef.current = false
+      if (viaWatchdog) console.warn('[TTS] watchdog fired — audio never signaled completion')
       onEnd()
+    }
+    const armWatchdog = () => {
+      clearWatchdog()
+      const budget = Math.max(15000, text.length * 90 + 3000)
+      watchdogRef.current = setTimeout(() => finalize(true), budget)
+    }
+
+    // Captions mode: no audio at all — give a silent reading window scaled to
+    // the text length, then continue the loop.
+    if (captionsMode) {
+      armWatchdog()
+      setTimeout(() => finalize(), Math.max(2500, text.length * 55))
+      return
+    }
+
+    const speakWithBrowser = () => {
+      if (!('speechSynthesis' in window)) {
+        ttsFailStreakRef.current++
+        if (ttsFailStreakRef.current >= 2) setCaptionsMode(true)
+        setTimeout(() => finalize(), Math.max(2500, text.length * 55))
+        return
+      }
+      const utterance = new SpeechSynthesisUtterance(text)
+      const voices = window.speechSynthesis.getVoices()
+      const wantLang = languageRef.current === 'hi' ? 'hi' : 'en-IN'
+      const preferred = voices.find(v => v.lang.includes(wantLang))
+        ?? voices.find(v => v.name.toLowerCase().includes('google'))
+        ?? null
+      if (preferred) utterance.voice = preferred
+      utterance.rate = 1.05
+      utterance.onend = () => { ttsFailStreakRef.current = 0; finalize() }
+      utterance.onerror = () => {
+        ttsFailStreakRef.current++
+        if (ttsFailStreakRef.current >= 2) setCaptionsMode(true)
+        finalize()
+      }
+      armWatchdog()
+      window.speechSynthesis.speak(utterance)
     }
 
     try {
@@ -96,6 +196,7 @@ export function useTTS(formId: string, setVoiceState: (s: VoiceState) => void) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ formId, text, language: languageRef.current }),
+        signal: AbortSignal.timeout(TTS_FETCH_TIMEOUT_MS),
       })
       const data = await res.json()
       if (data.fallback || data.error || !data.audioContent) throw new Error('fallback')
@@ -105,23 +206,25 @@ export function useTTS(formId: string, setVoiceState: (s: VoiceState) => void) {
       const mimeType = data.format === 'wav' ? 'audio/wav' : 'audio/mpeg'
       audio.src = `data:${mimeType};base64,${data.audioContent}`
       audio.load()
-      audio.onended = handleEnd
-      audio.onerror = () => { console.warn('[TTS] fallback to native'); handleEnd() }
+      audio.onended = () => { ttsFailStreakRef.current = 0; finalize() }
+      audio.onerror = () => { console.warn('[TTS] playback error, finalizing'); finalize() }
+      armWatchdog()
       await audio.play().catch(() => { throw new Error('autoplay blocked') })
     } catch {
-      if (!('speechSynthesis' in window)) { isSpeakingRef.current = false; onEnd(); return }
-      const utterance = new SpeechSynthesisUtterance(text)
-      const voices = window.speechSynthesis.getVoices()
-      const preferred = voices.find(v => v.lang.includes('en-IN'))
-        ?? voices.find(v => v.name.toLowerCase().includes('google'))
-        ?? null
-      if (preferred) utterance.voice = preferred
-      utterance.rate = 1.05
-      utterance.onend = handleEnd
-      utterance.onerror = () => { isSpeakingRef.current = false; onEnd() }
-      window.speechSynthesis.speak(utterance)
+      speakWithBrowser()
     }
-  }, [formId, setVoiceState])
+  }, [formId, setVoiceState, captionsMode, clearWatchdog])
 
-  return { audioRef, fillerAudioRef, fillerFormatRef, languageRef, isSpeakingRef, playSmartAudio, killAudio, playChime, switchToEnglishFillers }
+  return {
+    audioRef,
+    fillerAudioRef,
+    fillerFormatRef,
+    languageRef,
+    isSpeakingRef,
+    captionsMode,
+    playSmartAudio,
+    killAudio,
+    playChime,
+    switchFillers,
+  }
 }

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { ApiErrorCode } from '@/lib/api-errors'
 
 export type Message = {
   id: string
@@ -19,8 +20,12 @@ interface ConversationState {
   mode: InputMode
   isAiTyping: boolean
   connectionLost: boolean
+  // Set when the conversation hits an unrecoverable error (no keys, form
+  // closed, etc.) — renders a full-screen blocked state instead of retry UI.
+  fatalError: ApiErrorCode | null
 
   init: (formId: string, fields: any[]) => void
+  setFatalError: (code: ApiErrorCode | null) => void
   setMode: (mode: InputMode) => void
   addMessage: (msg: Message) => void
   replaceMessage: (id: string, newMsg: Message) => void
@@ -43,6 +48,7 @@ export const useConversationStore = create<ConversationState>()((set) => ({
   mode: 'choice',
   isAiTyping: false,
   connectionLost: false,
+  fatalError: null,
 
   init: (formId, fields) => set({
     formId,
@@ -55,7 +61,9 @@ export const useConversationStore = create<ConversationState>()((set) => ({
     audioBlobs: {},
     isAiTyping: false,
     connectionLost: false,
+    fatalError: null, // must reset — a config error on one form must not leak into the next
   }),
+  setFatalError: (code) => set({ fatalError: code }),
   setMode: (mode) => set({ mode }),
   addMessage: (msg) => set((state) => ({ history: [...state.history, msg] })),
   replaceMessage: (id, newMsg) => set((state) => ({

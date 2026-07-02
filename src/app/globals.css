@@ -71,3 +71,35 @@ body {
 .pill-timer {
   animation: pill-drain 2000ms linear forwards;
 }
+
+/* ─── Landing: sound-ripple motif ─── */
+@keyframes ripple-out {
+  0%   { transform: scale(0.6); opacity: 0.5; }
+  100% { transform: scale(1.8); opacity: 0; }
+}
+.ripple-ring {
+  animation: ripple-out 3.2s ease-out infinite;
+}
+
+/* Blinking caret for the self-typing demo transcript */
+@keyframes caret-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+.caret {
+  animation: caret-blink 1s step-end infinite;
+}
+
+/* ─── Respect reduced-motion: kill looping animations ─── */
+@media (prefers-reduced-motion: reduce) {
+  .pill-timer,
+  .ripple-ring,
+  .caret,
+  .animate-pulse,
+  .animate-spin {
+    animation: none !important;
+  }
+  * {
+    scroll-behavior: auto !important;
+  }
+}

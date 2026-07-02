@@ -197,7 +197,7 @@ export function useVoiceRecorder(
             return
           }
 
-          // Time-domain RMS — consistent with useBargein, avoids frequency bin confusion
+          // Time-domain RMS — avoids frequency bin confusion
           analyser.getByteTimeDomainData(dataArray)
           let sum = 0
           for (let i = 0; i < dataArray.length; i++) {
