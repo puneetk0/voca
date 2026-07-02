@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
+import { checkLimit } from '@/lib/ratelimit'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -47,8 +48,8 @@ export async function POST(req: Request) {
 
     if (ratelimit) {
       const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '127.0.0.1'
-      const { success } = await ratelimit.limit(`tts_${ip}_${formId}`)
-      if (!success) {
+      const allowed = await checkLimit(ratelimit, `tts_${ip}_${formId}`)
+      if (!allowed) {
         return NextResponse.json({ error: 'Rate limit exceeded', code: 'rate_limited' }, { status: 429 })
       }
     }

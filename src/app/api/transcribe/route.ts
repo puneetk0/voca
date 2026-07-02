@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
+import { checkLimit } from '@/lib/ratelimit'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -33,8 +34,8 @@ export async function POST(req: Request) {
 
     if (ratelimit) {
       const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '127.0.0.1'
-      const { success } = await ratelimit.limit(`transcribe_${ip}_${formId ?? 'admin'}`)
-      if (!success) {
+      const allowed = await checkLimit(ratelimit, `transcribe_${ip}_${formId ?? 'admin'}`)
+      if (!allowed) {
         return NextResponse.json(
           { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },
           { status: 429 },

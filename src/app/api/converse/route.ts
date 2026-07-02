@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
 import { callFastFirst } from '@/lib/llm'
+import { checkLimit } from '@/lib/ratelimit'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -246,8 +247,8 @@ export async function POST(req: Request) {
     if (ratelimit) {
       // Key on IP only — not formId (user-supplied, spoofable)
       const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '127.0.0.1'
-      const { success } = await ratelimit.limit(`converse_${ip}`)
-      if (!success) {
+      const allowed = await checkLimit(ratelimit, `converse_${ip}`)
+      if (!allowed) {
         return NextResponse.json(
           { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },
           { status: 429 },

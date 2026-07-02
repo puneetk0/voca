@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { callFastFirst } from '@/lib/llm'
+import { checkLimit } from '@/lib/ratelimit'
 import { Ratelimit } from '@upstash/ratelimit'
 import { Redis } from '@upstash/redis'
 
@@ -23,8 +24,8 @@ export async function POST(req: Request) {
 
   // Rate limit: 10 form creations per user per hour
   if (ratelimit) {
-    const { success } = await ratelimit.limit(`create_form_${user.id}`)
-    if (!success) {
+    const allowed = await checkLimit(ratelimit, `create_form_${user.id}`)
+    if (!allowed) {
       return NextResponse.json({ error: 'Too many forms created. Try again later.', code: 'rate_limited' }, { status: 429 })
     }
   }
