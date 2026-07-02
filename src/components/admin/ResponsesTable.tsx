@@ -77,6 +77,7 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
   const [responses, setResponses] = useState<Response[]>(initialResponses)
   const [answers, setAnswers] = useState<Answer[]>(initialAnswers)
   const [drawerResponse, setDrawerResponse] = useState<Response | null>(null)
+  const [livePaused, setLivePaused] = useState(false)
 
   const previewFields = fields.slice(0, MAX_TABLE_FIELDS)
   const hiddenFieldCount = Math.max(0, fields.length - MAX_TABLE_FIELDS)
@@ -114,7 +115,14 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
           fetchAnswers()
         }
       )
-      .subscribe()
+      .subscribe((status) => {
+        // Surface a dead subscription instead of silently missing new rows.
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          setLivePaused(true)
+        } else if (status === 'SUBSCRIBED') {
+          setLivePaused(false)
+        }
+      })
 
     return () => { supabase.removeChannel(channel) }
   }, [formId])
@@ -130,6 +138,11 @@ export default function ResponsesTable({ formId, fields, initialResponses, initi
 
   return (
     <>
+      {livePaused && (
+        <div className="mb-3 rounded-xl bg-accent-amber/[0.06] border border-accent-amber/15 px-4 py-2.5 text-xs text-accent-amber">
+          Live updates paused. Refresh to see the latest responses.
+        </div>
+      )}
       <div className="relative overflow-x-auto rounded-2xl border border-foreground/10 bg-foreground/[0.02] max-h-[600px] overflow-y-auto">
         <table className="w-full text-sm text-left whitespace-nowrap">
           <thead className="bg-foreground/[0.03] text-foreground/50 border-b border-foreground/10 uppercase text-xs tracking-wider sticky top-0 z-10">

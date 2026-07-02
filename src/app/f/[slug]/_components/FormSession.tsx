@@ -502,6 +502,12 @@ export default function FormSession({
           .then(res => { if (res && 'sessionId' in res && res.sessionId) sessionIdRef.current = res.sessionId })
           .catch(() => {})
       } catch { }
+      // Top-of-funnel event so PostHog matches the in-app session funnel.
+      try {
+        if (typeof window !== 'undefined' && (window as any).posthog) {
+          (window as any).posthog.capture('form_started', { form_id: form.id, total_fields: fields.length })
+        }
+      } catch { }
     }
 
     const startFieldIndex = Math.max(0, fields.findIndex(f => !store.answers[f.id]))

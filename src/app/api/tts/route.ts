@@ -4,6 +4,8 @@ import { createClient } from '@/lib/supabase/server'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
+export const maxDuration = 30
+
 const url = process.env.UPSTASH_REDIS_REST_URL
 const redis = url && url.startsWith('http') ? Redis.fromEnv() : null
 const ratelimit = redis ? new Ratelimit({
