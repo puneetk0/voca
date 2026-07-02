@@ -94,6 +94,9 @@ ALTER TABLE transcripts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE form_sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waitlist ENABLE ROW LEVEL SECURITY;
 
+-- waitlist: anyone may join (anonymous insert)
+CREATE POLICY "Anyone can join waitlist" ON waitlist FOR INSERT WITH CHECK (true);
+
 -- users policies
 CREATE POLICY "Users can view their own profile" ON users FOR SELECT USING (auth.uid() = id);
 CREATE POLICY "Users can update their own profile" ON users FOR UPDATE USING (auth.uid() = id);

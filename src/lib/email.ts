@@ -33,8 +33,12 @@ export async function sendResponseNotification({
 
   const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://voca.app'}/admin/forms/${formId}`
 
+  // Custom from-addresses need a verified domain in Resend; the resend.dev
+  // default works out-of-box for testing.
+  const from = process.env.EMAIL_FROM || 'Voca <onboarding@resend.dev>'
+
   await resend.emails.send({
-    from: 'Voca <notifications@voca.app>',
+    from,
     to: [toEmail],
     subject: `New response to "${formTitle}"`,
     text: [
