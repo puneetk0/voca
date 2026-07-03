@@ -1,7 +1,9 @@
 'use server'
 
+import { headers } from 'next/headers'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { sendWaitlistWelcome } from '@/lib/email'
+import { checkLimit, clientIp } from '@/lib/ratelimit'
 
 export async function joinWaitlist(
   email: string,
@@ -11,6 +13,13 @@ export async function joinWaitlist(
   // Basic format + sanity caps (RFC max address length is 254)
   if (!cleaned || cleaned.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleaned)) {
     return { error: 'Please enter a valid email address.' }
+  }
+
+  // Spam guard: a person joins a waitlist once, not fifty times a minute.
+  const ip = clientIp(await headers())
+  const allowed = await checkLimit(null, `waitlist_${ip}`, { limit: 5, windowMs: 10 * 60_000 })
+  if (!allowed) {
+    return { error: 'Too many attempts. Please try again in a few minutes.' }
   }
 
   const { error } = await supabaseAdmin

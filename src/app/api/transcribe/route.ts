@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
-import { checkLimit } from '@/lib/ratelimit'
+import { checkLimit, isAllowedOrigin, clientIp } from '@/lib/ratelimit'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -19,6 +19,10 @@ const ratelimit = redis ? new Ratelimit({
 
 export async function POST(req: Request) {
   try {
+    if (!isAllowedOrigin(req)) {
+      return NextResponse.json({ error: 'Forbidden', code: 'bad_request' }, { status: 403 })
+    }
+
     const formData = await req.formData()
     const file = formData.get('audio') as Blob
     const formId = formData.get('formId') as string | null
@@ -32,9 +36,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Audio too large (max 10MB)', code: 'bad_request' }, { status: 413 })
     }
 
-    if (ratelimit) {
-      const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '127.0.0.1'
-      const allowed = await checkLimit(ratelimit, `transcribe_${ip}_${formId ?? 'admin'}`)
+    {
+      const ip = clientIp(req.headers)
+      const allowed = await checkLimit(ratelimit, `transcribe_${ip}_${formId ?? 'admin'}`, { limit: 20, windowMs: 5 * 60_000 })
       if (!allowed) {
         return NextResponse.json(
           { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },

@@ -97,7 +97,17 @@ export default async function ResponderPage({
     return <FormNotice title={form.title} message="This form isn't ready yet. The form creator needs to finish setting up its AI before it can take responses." />
   }
 
-  const { ref: _ref, preview: _preview, ...prefills } = rawSearch
+  // Prefills flow into the AI prompt — cap count and lengths, strip newlines
+  // (an attacker could otherwise smuggle prompt-injection via the URL).
+  const { ref: _ref, preview: _preview, ...rawPrefills } = rawSearch
+  const prefills = Object.fromEntries(
+    Object.entries(rawPrefills)
+      .slice(0, 8)
+      .map(([k, v]) => [
+        k.replace(/[\r\n]/g, ' ').slice(0, 50),
+        String(v ?? '').replace(/[\r\n]/g, ' ').slice(0, 150),
+      ]),
+  )
 
   return <FormSession form={form} fields={fields} prefills={prefills} userEmail={user?.email} isPreview={isPreview} />
 }

@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
 import { callFastFirst } from '@/lib/llm'
-import { checkLimit } from '@/lib/ratelimit'
+import { checkLimit, isAllowedOrigin, clientIp } from '@/lib/ratelimit'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -239,27 +239,41 @@ IMPORTANT FOR JSON SCHEMA:
 
 export async function POST(req: Request) {
   try {
+    // Same-origin gate + body-size cap BEFORE parsing (LLM calls cost money)
+    if (!isAllowedOrigin(req)) {
+      return NextResponse.json({ error: 'Forbidden', code: 'bad_request' }, { status: 403 })
+    }
+    const contentLength = parseInt(req.headers.get('content-length') ?? '0', 10)
+    if (contentLength > 64 * 1024) {
+      return NextResponse.json({ error: 'Payload too large', code: 'bad_request' }, { status: 413 })
+    }
+
     const {
       formId,
       currentFieldIndex,
-      history,
-      userMessage,
+      history: rawHistory,
+      userMessage: rawUserMessage,
       extraContext,
       userEmail,
       confidence,
       currentLanguage,
     } = await req.json()
 
-    if (ratelimit) {
-      // Key on IP only — not formId (user-supplied, spoofable)
-      const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '127.0.0.1'
-      const allowed = await checkLimit(ratelimit, `converse_${ip}`)
-      if (!allowed) {
-        return NextResponse.json(
-          { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },
-          { status: 429 },
-        )
-      }
+    // Server-side input caps — never trust client-declared sizes
+    const userMessage = typeof rawUserMessage === 'string' ? rawUserMessage.slice(0, 2000) : ''
+    const history = (Array.isArray(rawHistory) ? rawHistory : [])
+      .slice(-12)
+      .map((m: any) => ({ role: m?.role, text: String(m?.text ?? '').slice(0, 1000) }))
+
+    // Key on IP only — not formId (user-supplied, spoofable).
+    // In-memory fallback keeps a limit even without Upstash.
+    const ip = clientIp(req.headers)
+    const allowed = await checkLimit(ratelimit, `converse_${ip}`, { limit: 30, windowMs: 5 * 60_000 })
+    if (!allowed) {
+      return NextResponse.json(
+        { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },
+        { status: 429 },
+      )
     }
 
     // Perf: fetch form + fields in parallel — only keys fetch depends on form.user_id
@@ -336,7 +350,7 @@ GOLD STANDARD shape: "Thank you so much for your time, Puneet. We really hope to
 - No more questions. No new information. Just a warm, human goodbye.`
 
     const userPrompt = [
-      extraContext ?? '',
+      typeof extraContext === 'string' ? extraContext.slice(0, 600) : '',
       `Current field: "${currentField.label}" (${currentField.field_type})`,
       `Progress: question ${currentFieldIndex + 1} of ${fields.length}.`,
       nextFieldContext,

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
-import { checkLimit } from '@/lib/ratelimit'
+import { checkLimit, isAllowedOrigin, clientIp } from '@/lib/ratelimit'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -50,19 +50,30 @@ function cleanText(text: string): string {
 
 export async function POST(req: Request) {
   try {
+    // Same-origin gate + body cap before doing anything billable
+    if (!isAllowedOrigin(req)) {
+      return NextResponse.json({ error: 'Forbidden', code: 'bad_request' }, { status: 403 })
+    }
+    const contentLength = parseInt(req.headers.get('content-length') ?? '0', 10)
+    if (contentLength > 16 * 1024) {
+      return NextResponse.json({ error: 'Payload too large', code: 'bad_request' }, { status: 413 })
+    }
+
     const { formId, text, language } = await req.json()
     const lang: 'hi' | 'en' = language === 'en' ? 'en' : 'hi'
 
-    if (!formId || !text) {
+    if (!formId || !text || typeof text !== 'string') {
       return NextResponse.json({ error: 'Missing formId or text', code: 'bad_request' }, { status: 400 })
     }
+    // Sarvam bills per character — refuse anything beyond a real message size
+    if (text.length > 3000) {
+      return NextResponse.json({ error: 'Text too long', code: 'bad_request' }, { status: 413 })
+    }
 
-    if (ratelimit) {
-      const ip = req.headers.get('x-forwarded-for')?.split(',')[0].trim() ?? '127.0.0.1'
-      const allowed = await checkLimit(ratelimit, `tts_${ip}_${formId}`)
-      if (!allowed) {
-        return NextResponse.json({ error: 'Rate limit exceeded', code: 'rate_limited' }, { status: 429 })
-      }
+    const ip = clientIp(req.headers)
+    const allowed = await checkLimit(ratelimit, `tts_${ip}_${formId}`, { limit: 60, windowMs: 5 * 60_000 })
+    if (!allowed) {
+      return NextResponse.json({ error: 'Rate limit exceeded', code: 'rate_limited' }, { status: 429 })
     }
 
     // select('*') stays resilient if migration 0002 hasn't run yet
