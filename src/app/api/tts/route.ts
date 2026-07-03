@@ -81,9 +81,11 @@ export async function POST(req: Request) {
       }
     }
 
+    const speakable = cleanText(text)
+
     // Priority 1: Sarvam bulbul:v3 — natural prosody, best-in-class on
-    // abbreviations, numerics and code-mixing (the things v2 mangled).
-    // Configured via SARVAM_API_KEY; voice swappable via SARVAM_SPEAKER.
+    // abbreviations, numerics and code-mixing. One retry on transient failure:
+    // a single blip must not drop the session to a lesser voice.
     const sarvamKey = process.env.SARVAM_API_KEY
     if (sarvamKey) {
       // Tone shapes delivery: measured and steady for professional,
@@ -96,36 +98,84 @@ export async function POST(req: Request) {
         playful: { pace: 1.05, temperature: 0.8 },
       }[tone]
 
-      const sarvamRes = await fetch('https://api.sarvam.ai/text-to-speech', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'api-subscription-key': sarvamKey,
-        },
-        body: JSON.stringify({
-          text: cleanText(text),
-          target_language_code: lang === 'en' ? 'en-IN' : 'hi-IN',
-          model: 'bulbul:v3',
-          speaker: process.env.SARVAM_SPEAKER || 'priya',
-          pace,
-          temperature,
-          speech_sample_rate: 24000,
-        }),
-      })
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const sarvamRes = await fetch('https://api.sarvam.ai/text-to-speech', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'api-subscription-key': sarvamKey,
+            },
+            body: JSON.stringify({
+              text: speakable,
+              target_language_code: lang === 'en' ? 'en-IN' : 'hi-IN',
+              model: 'bulbul:v3',
+              speaker: process.env.SARVAM_SPEAKER || 'priya',
+              pace,
+              temperature,
+              speech_sample_rate: 24000,
+            }),
+            signal: AbortSignal.timeout(9000),
+          })
 
-      if (sarvamRes.ok) {
-        const sarvamData = await sarvamRes.json()
-        const audioContent = sarvamData?.audios?.[0]
-        if (audioContent) {
-          return NextResponse.json({ audioContent, format: 'wav' })
+          if (sarvamRes.ok) {
+            const sarvamData = await sarvamRes.json()
+            const audioContent = sarvamData?.audios?.[0]
+            if (audioContent) {
+              return NextResponse.json({ audioContent, format: 'wav' })
+            }
+          } else {
+            console.error('[TTS] Sarvam error:', sarvamRes.status, await sarvamRes.text().catch(() => ''))
+            // 4xx won't heal on retry; 5xx/timeouts get one more shot
+            if (sarvamRes.status < 500) break
+          }
+        } catch (e: any) {
+          console.warn(`[TTS] Sarvam attempt ${attempt + 1} failed:`, e?.message)
         }
-      } else {
-        console.error('[TTS] Sarvam error:', sarvamRes.status, await sarvamRes.text().catch(() => ''))
+        if (attempt === 0) await new Promise(r => setTimeout(r, 250))
+      }
+    }
+
+    // Priority 2 (English only): Groq Orpheus — a real neural voice on the keys
+    // we already have. Far better fallback than the robotic browser engine.
+    // NOTE: requires one-time terms acceptance in the Groq console:
+    // https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english
+    if (lang === 'en') {
+      const groqKeys = [process.env.GROQ_KEY, process.env.GROQ_KEY_2, process.env.GROQ_KEY_3].filter(Boolean) as string[]
+      for (const key of groqKeys) {
+        try {
+          const groqRes = await fetch('https://api.groq.com/openai/v1/audio/speech', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+            body: JSON.stringify({
+              model: 'canopylabs/orpheus-v1-english',
+              voice: process.env.GROQ_TTS_VOICE || 'tara',
+              input: speakable,
+              response_format: 'wav',
+            }),
+            signal: AbortSignal.timeout(9000),
+          })
+          if (groqRes.ok) {
+            const buf = Buffer.from(await groqRes.arrayBuffer())
+            console.warn('[TTS] Sarvam unavailable — served Groq Orpheus fallback voice')
+            return NextResponse.json({ audioContent: buf.toString('base64'), format: 'wav' })
+          }
+          const body = await groqRes.text().catch(() => '')
+          if (body.includes('model_terms_required')) {
+            console.error('[TTS] Groq Orpheus needs one-time terms acceptance: https://console.groq.com/playground?model=canopylabs%2Forpheus-v1-english')
+          } else {
+            console.error('[TTS] Groq Orpheus error:', groqRes.status, body.slice(0, 200))
+          }
+          if (groqRes.status !== 429) break // only rate limits advance to the next key
+        } catch (e: any) {
+          console.warn('[TTS] Groq Orpheus attempt failed:', e?.message)
+          break
+        }
       }
     }
 
     // No premium voice available — the client degrades to the browser's built-in
-    // speech, then to captions mode. (Google Cloud TTS was removed.)
+    // speech, then to captions mode.
     return NextResponse.json({ fallback: true })
 
   } catch (err: any) {

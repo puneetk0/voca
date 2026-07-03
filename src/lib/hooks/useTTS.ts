@@ -9,7 +9,10 @@ const FILLERS: Record<'hi' | 'en', string[]> = {
   en: ["Hmm...", "Okay...", "Right...", "Got it..."],
 }
 
-const TTS_FETCH_TIMEOUT_MS = 5000
+// Long openers legitimately take Sarvam 7-8s to synthesize — aborting at 5s
+// was silently dropping the most important line of the form to the robotic
+// browser voice. The watchdog still bounds total wait.
+const TTS_FETCH_TIMEOUT_MS = 12000
 
 export function useTTS(
   formId: string,
@@ -203,6 +206,10 @@ export function useTTS(
 
       if (!audioRef.current) audioRef.current = new Audio()
       const audio = audioRef.current
+      // Defensive: the element is reused across turns — never inherit a stale
+      // rate (this manifested as the voice suddenly "speaking slow").
+      audio.playbackRate = 1
+      audio.defaultPlaybackRate = 1
       const mimeType = data.format === 'wav' ? 'audio/wav' : 'audio/mpeg'
       audio.src = `data:${mimeType};base64,${data.audioContent}`
       audio.load()

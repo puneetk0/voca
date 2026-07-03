@@ -422,6 +422,7 @@ export default function FormSession({
         const base64 = fillerAudioRef.current[Math.floor(Math.random() * fillerAudioRef.current.length)]
         audioRef.current.onended = null // CRITICAL: Clear old playback handlers!
         isSpeakingRef.current = true    // CRITICAL: Lock VAD while filler plays
+        audioRef.current.playbackRate = 1 // never inherit a stale rate
         audioRef.current.src = `data:audio/${fillerFormatRef.current};base64,${base64}`
         audioRef.current.play().catch(() => { })
         setVoiceState('speaking') // turns the orb instantly yellow/active

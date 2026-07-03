@@ -44,14 +44,18 @@ export async function POST(req: Request) {
     }
 
     let keys: { groq_key?: string | null } | null = null
+    let formContext = ''
 
     if (formId) {
+      // select('*') stays resilient if personality migrations haven't run yet
       const { data: form } = await supabaseAdmin
         .from('forms')
-        .select('user_id')
+        .select('*')
         .eq('id', formId)
         .single()
       if (!form) return NextResponse.json({ error: 'Form not found', code: 'not_found' }, { status: 404 })
+      // Bias Whisper toward this form's vocabulary (event names, orgs, jargon)
+      formContext = [form.title, form.ai_context].filter(Boolean).join('. ').slice(0, 300)
       const { data } = await supabaseAdmin
         .from('user_keys')
         .select('groq_key')
@@ -89,55 +93,9 @@ export async function POST(req: Request) {
       : clientMimeType.includes('ogg') ? 'ogg'
         : 'webm'
 
-    // --- GROQ WHISPER PATH (PRIMARY) ---
-    if (hasGroq) {
-      try {
-        const groqData = new FormData()
-        groqData.append('file', file, `audio.${ext}`)
-        groqData.append('model', 'whisper-large-v3-turbo')
-        groqData.append('response_format', 'verbose_json')
-        groqData.append('language', 'en')
-        // Priming prompt conditions Whisper on Indian English and prevents
-        // silence hallucination (Whisper sometimes invents phrases on silence/noise)
-        groqData.append(
-          'prompt',
-          'Transcribe this form response. Speaker uses Indian English or Hinglish. Common words: okay, yes, no, actually, basically, na, yaar, theek hai.',
-        )
-
-        let sttDone = false
-        for (let ki = 0; ki < groqKeyList.length; ki++) {
-          const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${groqKeyList[ki]}` },
-            body: groqData as unknown as BodyInit,
-          })
-          const groqJson = await groqRes.json()
-
-          if (groqRes.status === 429 && ki < groqKeyList.length - 1) {
-            console.warn(`[STT] Groq key ${ki + 1} rate-limited, trying key ${ki + 2}…`)
-            continue
-          }
-          if (!groqRes.ok) {
-            console.error('Groq STT error:', groqJson)
-            if (!hasSarvam) throw new Error(groqJson.error?.message || 'Groq transcription failed')
-            console.warn('[STT] Groq failed, falling back to Sarvam...')
-            break
-          }
-          // Success
-          const groqConfidence = groqJson.segments?.[0]?.avg_logprob
-            ? Math.exp(groqJson.segments[0].avg_logprob)
-            : 0.9
-          sttDone = true
-          return NextResponse.json({ transcript: groqJson.text ?? '', confidence: groqConfidence })
-        }
-        if (sttDone) return // satisfied above — TypeScript needs this
-      } catch (groqErr: any) {
-        if (!hasSarvam) throw groqErr
-        console.warn('[STT] Groq exception, falling back to Sarvam:', groqErr.message)
-      }
-    }
-
-    // --- SARVAM STT PATH (FALLBACK) — strong on Hinglish / code-mixing ---
+    // --- SARVAM SAARIKA PATH (PRIMARY) ---
+    // Purpose-built for Indian accents, names and code-mixed speech — Whisper
+    // consistently mangles Indian proper nouns ("Puneet" → "bony").
     if (hasSarvam) {
       try {
         const sarvamData = new FormData()
@@ -149,17 +107,56 @@ export async function POST(req: Request) {
           method: 'POST',
           headers: { 'api-subscription-key': process.env.SARVAM_API_KEY! },
           body: sarvamData as unknown as BodyInit,
+          signal: AbortSignal.timeout(10000),
         })
         const sarvamJson = await sarvamRes.json()
 
-        if (!sarvamRes.ok) {
-          console.error('Sarvam STT error:', sarvamJson)
-          throw new Error(sarvamJson.error?.message || 'Sarvam transcription failed')
+        if (sarvamRes.ok) {
+          return NextResponse.json({ transcript: sarvamJson.transcript ?? '', confidence: 0.9 })
         }
-
-        return NextResponse.json({ transcript: sarvamJson.transcript ?? '', confidence: 0.9 })
+        console.error('[STT] Sarvam error:', sarvamJson)
+        if (!hasGroq) throw new Error(sarvamJson.error?.message || 'Sarvam transcription failed')
+        console.warn('[STT] Sarvam failed, falling back to Groq Whisper...')
       } catch (sarvamErr: any) {
-        throw sarvamErr
+        if (!hasGroq) throw sarvamErr
+        console.warn('[STT] Sarvam exception, falling back to Groq Whisper:', sarvamErr.message)
+      }
+    }
+
+    // --- GROQ WHISPER PATH (FALLBACK) ---
+    if (hasGroq) {
+      const groqData = new FormData()
+      groqData.append('file', file, `audio.${ext}`)
+      groqData.append('model', 'whisper-large-v3-turbo')
+      groqData.append('response_format', 'verbose_json')
+      groqData.append('language', 'en')
+      // Priming prompt: conditions Whisper on Indian English, prevents silence
+      // hallucination, and biases it toward THIS form's vocabulary.
+      groqData.append(
+        'prompt',
+        `Transcribe this form response. Speaker uses Indian English or Hinglish, and may say Indian names.${formContext ? ` Context: ${formContext}.` : ''} Common words: okay, yes, no, actually, basically, na, yaar, theek hai.`,
+      )
+
+      for (let ki = 0; ki < groqKeyList.length; ki++) {
+        const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${groqKeyList[ki]}` },
+          body: groqData as unknown as BodyInit,
+        })
+        const groqJson = await groqRes.json()
+
+        if (groqRes.status === 429 && ki < groqKeyList.length - 1) {
+          console.warn(`[STT] Groq key ${ki + 1} rate-limited, trying key ${ki + 2}…`)
+          continue
+        }
+        if (!groqRes.ok) {
+          console.error('Groq STT error:', groqJson)
+          throw new Error(groqJson.error?.message || 'Transcription failed')
+        }
+        const groqConfidence = groqJson.segments?.[0]?.avg_logprob
+          ? Math.exp(groqJson.segments[0].avg_logprob)
+          : 0.9
+        return NextResponse.json({ transcript: groqJson.text ?? '', confidence: groqConfidence })
       }
     }
 
