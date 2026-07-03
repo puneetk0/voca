@@ -1,13 +1,19 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 
 // --- VAD Constants ---
-const SILENCE_THRESHOLD = 12
-const MAX_SILENCE_MS = 2400
+const SILENCE_THRESHOLD = 10       // absolute minimum noise floor
+const MAX_SILENCE_MS = 1600        // pause length that ends the answer (snappy turn-taking)
 const VAD_INTERVAL_MS = 80
 const NOISE_CALIBRATION_MS = 600
-const FLOOR_MULTIPLIER = 1.25
-const FLOOR_MAX = 32
+const FLOOR_MULTIPLIER = 1.4       // applied to the ambient MEDIAN (not max — max over-calibrates)
+const FLOOR_MAX = 24               // never let a noisy calibration eat quiet speech
 const MIN_SPEECH_BEFORE_CUTOFF_MS = 700
+// Relative silence: once the user has spoken, "silence" is anything quieter
+// than a fraction of THEIR observed speech peak — robust across mic gains.
+const PEAK_SILENCE_RATIO = 0.25
+// Failsafes — the mic must NEVER record forever:
+const NO_SPEECH_TIMEOUT_MS = 8000  // nothing heard → stop, let the empty-capture reprompt run
+const MAX_RECORDING_MS = 45000     // hard cap → stop and transcribe what we have
 
 export function useVoiceRecorder(
   onTranscription: (text: string, audioBlob: Blob, confidence: number) => void,
@@ -31,6 +37,8 @@ export function useVoiceRecorder(
   const vadAudioCtxRef = useRef<AudioContext | null>(null)
   const silenceTimerRef = useRef(0)
   const speechDurationRef = useRef(0)
+  const speechPeakRef = useRef(0)
+  const elapsedMsRef = useRef(0)
   const noiseFloorRef = useRef(SILENCE_THRESHOLD)
   const calibrationSamplesRef = useRef<number[]>([])
   const calibrationDoneRef = useRef(false)
@@ -165,6 +173,8 @@ export function useVoiceRecorder(
       // --- VAD Setup ---
       silenceTimerRef.current = 0
       speechDurationRef.current = 0
+      speechPeakRef.current = 0
+      elapsedMsRef.current = 0
       noiseFloorRef.current = SILENCE_THRESHOLD
       calibrationSamplesRef.current = []
       calibrationDoneRef.current = false
@@ -197,6 +207,22 @@ export function useVoiceRecorder(
             return
           }
 
+          elapsedMsRef.current += VAD_INTERVAL_MS
+
+          // FAILSAFE 1: never record forever — hard cap, transcribe what we have.
+          if (elapsedMsRef.current >= MAX_RECORDING_MS) {
+            console.warn('[VAD] Max recording duration reached — stopping')
+            stopRecording()
+            return
+          }
+          // FAILSAFE 2: nothing heard at all — stop; the empty-transcript
+          // path replays the question and hints at the text input.
+          if (speechDurationRef.current === 0 && elapsedMsRef.current >= NO_SPEECH_TIMEOUT_MS) {
+            console.debug('[VAD] No speech detected — stopping')
+            stopRecording()
+            return
+          }
+
           // Time-domain RMS — avoids frequency bin confusion
           analyser.getByteTimeDomainData(dataArray)
           let sum = 0
@@ -206,7 +232,10 @@ export function useVoiceRecorder(
           }
           const currentVol = Math.sqrt(sum / dataArray.length)
 
-          // Phase 1: Calibrate noise floor for first NOISE_CALIBRATION_MS
+          // Phase 1: Calibrate noise floor for first NOISE_CALIBRATION_MS.
+          // MEDIAN of ambient samples — a single cough/click during calibration
+          // must not raise the floor above quiet speech (the old max-based
+          // floor caused "never auto-stops" for soft speakers).
           if (!calibrationDoneRef.current) {
             calibrationTicksRef.current++
             // Skip tick 1 — first read is often noisy (mic just opened)
@@ -214,35 +243,42 @@ export function useVoiceRecorder(
               calibrationSamplesRef.current.push(currentVol)
             }
             if (calibrationTicksRef.current >= calibrationTicks) {
-              const samples = calibrationSamplesRef.current
-              const ambientMax = samples.length
-                ? samples.reduce((a, b) => Math.max(a, b), 0)
-                : 0
+              const samples = [...calibrationSamplesRef.current].sort((a, b) => a - b)
+              const ambientMedian = samples.length ? samples[Math.floor(samples.length / 2)] : 0
               noiseFloorRef.current = Math.min(
-                Math.max(SILENCE_THRESHOLD, ambientMax * FLOOR_MULTIPLIER),
+                Math.max(SILENCE_THRESHOLD, ambientMedian * FLOOR_MULTIPLIER),
                 FLOOR_MAX,
               )
               calibrationDoneRef.current = true
-              console.debug(`[VAD] Noise floor: ${noiseFloorRef.current.toFixed(2)} (ambient peak: ${ambientMax.toFixed(2)})`)
+              console.debug(`[VAD] Noise floor: ${noiseFloorRef.current.toFixed(2)} (ambient median: ${ambientMedian.toFixed(2)})`)
             }
             return
           }
 
-          // Phase 2: Silence detection + expose normalised volume for waveform
-          if (currentVol < noiseFloorRef.current) {
-            setVadVolume(0) // below noise floor = silence
+          // Phase 2: Silence detection + expose normalised volume for waveform.
+          // Once the user has spoken, "silence" is relative to THEIR speech
+          // peak — robust across quiet mics and loud rooms.
+          const silenceCutoff = speechPeakRef.current > 0
+            ? Math.max(noiseFloorRef.current, speechPeakRef.current * PEAK_SILENCE_RATIO)
+            : noiseFloorRef.current
+
+          if (currentVol < silenceCutoff) {
+            setVadVolume(0)
             // Only count silence toward cutoff once user has actually spoken for a bit.
             // This prevents cutting off someone who pauses before starting their answer.
             if (speechDurationRef.current >= MIN_SPEECH_BEFORE_CUTOFF_MS) {
               silenceTimerRef.current += VAD_INTERVAL_MS
               if (silenceTimerRef.current >= MAX_SILENCE_MS) {
                 console.debug('[VAD] Silence detected — stopping')
+                // VAD proved itself: the "tap when done" hint can stay hidden.
+                try { localStorage.setItem('voca_vad_ok', '1') } catch { }
                 stopRecording()
               }
             }
           } else {
             silenceTimerRef.current = 0
             speechDurationRef.current += VAD_INTERVAL_MS
+            speechPeakRef.current = Math.max(speechPeakRef.current, currentVol)
             // Normalize: 0 at noise floor, 1 at 4× floor (typical speech peak)
             const normalised = Math.min((currentVol - noiseFloorRef.current) / (noiseFloorRef.current * 3), 1)
             setVadVolume(normalised)

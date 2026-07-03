@@ -230,6 +230,17 @@ export default function FormSession({
     return () => clearTimeout(timer)
   }, [showTextHint])
 
+  // "Tap when done" hint: appears after 2s of listening, and retires forever
+  // once the VAD proves it can auto-stop (recorder sets voca_vad_ok on its
+  // first successful silence-stop).
+  const [showDoneHint, setShowDoneHint] = useState(false)
+  useEffect(() => {
+    if (voiceState !== 'listening') { setShowDoneHint(false); return }
+    try { if (localStorage.getItem('voca_vad_ok') === '1') return } catch { }
+    const t = setTimeout(() => setShowDoneHint(true), 2000)
+    return () => clearTimeout(t)
+  }, [voiceState])
+
   // Optimistic thinking label shown while Gemini processes
   function getThinkingLabel(_fieldType: string, _transcript: string) {
     return 'Extracting your answer...'
@@ -452,9 +463,39 @@ export default function FormSession({
     if (recorderError) setVoiceState('error')
   }, [isRecording, isProcessing, recorderError])
 
-  // After AI speaks and field is 'file', don't start the mic — user must tap upload
+  // Debounce for tap inputs (MCQ chips): blocks accidental double-fires while
+  // still allowing a deliberate re-tap (e.g. changing your answer) after 500ms.
+  const lastTapRef = useRef(0)
+
+  // BARGE-IN: the user takes over while the AI is speaking or thinking.
+  // Silences everything, aborts any in-flight turn, resets the busy flags —
+  // the caller then starts a fresh turn immediately. This is what makes chips,
+  // uploads and typing feel alive instead of "wait for the voice to finish".
+  const bargeIn = useCallback(() => {
+    killAudio()
+    stopRecording(true)
+    if (activeConverseRef.current) {
+      activeConverseRef.current.userAborted = true
+      activeConverseRef.current.controller.abort()
+      activeConverseRef.current = null
+    }
+    turnCounterRef.current++            // stale resolutions get discarded
+    pillResolveRef.current?.(false)     // void any pending correction pill
+    pillResolveRef.current = null
+    setPendingTranscript(null)
+    isHandlingTranscriptRef.current = false
+    store.setIsAiTyping(false)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [killAudio, stopRecording])
+
+  // Input mode per field: tap fields (mcq) and upload fields (file) never open
+  // the mic — the AI speaks the question, then the user just taps/uploads.
+  function inputModeFor(fieldIndex: number): 'voice' | 'tap' | 'upload' {
+    const t = fields[fieldIndex]?.field_type
+    return t === 'mcq' ? 'tap' : t === 'file' ? 'upload' : 'voice'
+  }
   function shouldAutoListen(fieldIndex: number) {
-    return fields[fieldIndex]?.field_type !== 'file'
+    return inputModeFor(fieldIndex) === 'voice'
   }
 
   async function handleInitialSequence() {
@@ -524,10 +565,10 @@ export default function FormSession({
   async function handleSendVoiceText(e: React.FormEvent) {
     e.preventDefault()
     const userMsg = inputText.trim()
-    if (!userMsg || isHandlingTranscriptRef.current) return
+    if (!userMsg) return
     setInputText('')
-    killAudio()
-    stopRecording(true)
+    // Typing is a barge-in: newest input wins, even mid-speech or mid-turn.
+    bargeIn()
     isHandlingTranscriptRef.current = true
     store.addMessage({ id: Date.now().toString(), role: 'user', text: userMsg })
     store.addMessage({ id: '__ai_thinking__', role: 'ai', text: getThinkingLabel(fields[store.currentFieldIndex]?.field_type || 'text', userMsg) })
@@ -803,13 +844,31 @@ export default function FormSession({
             )}
 
             <motion.button
-              aria-label={voiceState === 'listening' ? 'Stop recording' : voiceState === 'error' ? 'Tap to retry recording' : 'Voice input orb'}
+              aria-label={voiceState === 'listening' ? 'Stop recording' : voiceState === 'speaking' ? 'Skip the AI voice' : voiceState === 'error' ? 'Tap to retry recording' : 'Voice input orb'}
               onClick={() => {
                 if (voiceState === 'listening') stopRecording()
+                if (voiceState === 'speaking') {
+                  // Tap to skip the AI's speech.
+                  killAudio()
+                  if (activeConverseRef.current) {
+                    // Reply still coming (this was the filler) — keep thinking.
+                    setVoiceState('thinking')
+                  } else {
+                    isHandlingTranscriptRef.current = false
+                    setVoiceState('idle')
+                    const idx = useConversationStore.getState().currentFieldIndex
+                    if (idx >= fields.length) {
+                      // Skipped the final goodbye — go straight to review.
+                      store.setMode('review')
+                    } else if (shouldAutoListen(idx)) {
+                      startRecording()
+                    }
+                  }
+                }
                 if (voiceState === 'error') {
                   isHandlingTranscriptRef.current = false
                   setVoiceState('idle')
-                  startRecording()
+                  if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
                 }
               }}
               className={`relative z-10 w-[160px] h-[160px] rounded-full flex flex-col items-center justify-center transition-all duration-500 ${orbColour}`}
@@ -834,6 +893,20 @@ export default function FormSession({
               )}
             </motion.button>
           </div>
+
+          {/* First-time affordance until the VAD proves it auto-stops */}
+          <AnimatePresence>
+            {showDoneHint && voiceState === 'listening' && (
+              <motion.p
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                className="text-xs text-foreground/35 -mt-4"
+              >
+                Tap the orb when you&apos;re done
+              </motion.p>
+            )}
+          </AnimatePresence>
 
           {/* Correction window: what we heard, tap to fix while the AI thinks */}
           <AnimatePresence>
@@ -920,16 +993,18 @@ export default function FormSession({
               <button
                 key={opt}
                 onClick={async () => {
-                  // Prevent double-fire if already handling
-                  if (isHandlingTranscriptRef.current) return
-                  isHandlingTranscriptRef.current = true
+                  // Debounce accidental double-taps; deliberate re-taps
+                  // (changing your answer) work after 500ms and simply
+                  // supersede the in-flight turn via bargeIn.
+                  if (Date.now() - lastTapRef.current < 500) return
+                  lastTapRef.current = Date.now()
 
-                  // Synchronously kill all audio before any async work
-                  killAudio()
-                  stopRecording()
-                  
+                  // Tappable even while the AI is mid-sentence.
+                  bargeIn()
+                  setVoiceState('thinking')
+
                   store.addMessage({ id: Date.now().toString(), role: 'user', text: `[Selected: ${opt}]` })
-                  
+
                   await handleConverseResponse(`[User tapped: ${opt}]`, store.currentFieldIndex, 'voice', (aiMessage, isComplete) => {
                     playSmartAudio(aiMessage, () => {
                       isHandlingTranscriptRef.current = false
@@ -978,9 +1053,8 @@ export default function FormSession({
                     return
                   }
 
-                  // Synchronously kill audio + mic
-                  killAudio()
-                  stopRecording(true)
+                  // Uploadable even while the AI is mid-sentence.
+                  bargeIn()
                   setIsUploading(true)
                   setVoiceState('thinking')
 
