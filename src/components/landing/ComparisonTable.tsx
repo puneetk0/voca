@@ -32,7 +32,7 @@ export function ComparisonTable() {
     <section id="compare" className="mx-auto max-w-5xl scroll-mt-20 px-6 py-24">
       <Reveal>
         <div className="flex flex-col items-center text-center">
-          <Eyebrow>Compare</Eyebrow>
+          <Eyebrow n="04">Compare</Eyebrow>
           <h2 className="mt-5 max-w-2xl font-serif text-3xl leading-tight tracking-tight text-foreground sm:text-4xl lg:text-5xl">
             Not another form builder
           </h2>

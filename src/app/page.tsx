@@ -14,7 +14,9 @@ import { LandingFooter } from '@/components/landing/LandingFooter'
 
 export default function LandingPage() {
   return (
-    <div className="flex min-h-[100dvh] flex-col overflow-x-hidden bg-background">
+    // overflow-x-clip (not hidden): hidden creates a scroll container that
+    // silently breaks position:sticky on the nav; clip doesn't.
+    <div className="flex min-h-[100dvh] flex-col overflow-x-clip bg-background">
       <LandingNav />
       <main>
         <Hero />

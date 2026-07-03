@@ -47,10 +47,11 @@ export function SoundRipple({ className = '', color = 'var(--color-accent-amber)
   )
 }
 
-/** Small uppercase section eyebrow. */
-export function Eyebrow({ children }: { children: ReactNode }) {
+/** Small uppercase section eyebrow, optionally with an editorial number. */
+export function Eyebrow({ children, n }: { children: ReactNode; n?: string }) {
   return (
-    <div className="text-xs font-semibold uppercase tracking-[0.18em] text-accent-amber">
+    <div className="flex items-baseline gap-2.5 text-xs font-semibold uppercase tracking-[0.18em] text-accent-amber">
+      {n && <span className="font-mono text-[11px] font-normal tracking-normal text-foreground/30">{n}</span>}
       {children}
     </div>
   )

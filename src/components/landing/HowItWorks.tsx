@@ -24,7 +24,7 @@ export function HowItWorks() {
     <section id="how" className="mx-auto max-w-6xl px-6 py-24 scroll-mt-20">
       <Reveal>
         <div className="flex flex-col items-center text-center">
-          <Eyebrow>How it works</Eyebrow>
+          <Eyebrow n="02">How it works</Eyebrow>
           <h2 className="mt-5 max-w-2xl font-serif text-3xl leading-tight tracking-tight text-foreground sm:text-4xl lg:text-5xl">
             From idea to answers in three steps
           </h2>

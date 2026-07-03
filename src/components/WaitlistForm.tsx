@@ -21,7 +21,6 @@ export function WaitlistForm({ compact = false, tone = 'light' }: { compact?: bo
       const result = await joinWaitlist(email)
       if (result.success) {
         setState('success')
-        setMessage("You're in. Puneet will reach out personally.")
         if (typeof window !== 'undefined' && (window as any).posthog) {
           (window as any).posthog.capture('waitlist_joined', { email })
         }
@@ -35,14 +34,26 @@ export function WaitlistForm({ compact = false, tone = 'light' }: { compact?: bo
   if (state === 'success') {
     return (
       <motion.div
-        initial={{ opacity: 0, scale: 0.96, y: 8 }}
+        initial={{ opacity: 0, scale: 0.97, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
-        className={`flex items-center gap-3 rounded-2xl px-5 py-4 ${
-          dark ? 'border border-white/15 bg-white/5' : 'border border-accent-sage/25 bg-accent-sage/[0.08]'
+        transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+        className={`rounded-2xl border px-8 py-7 text-center ${
+          dark
+            ? 'border-white/10 bg-white/[0.04]'
+            : 'border-foreground/[0.08] bg-foreground/[0.02]'
         }`}
       >
-        <CheckCircle2 className={`h-5 w-5 shrink-0 ${dark ? 'text-lime-300' : 'text-accent-sage'}`} />
-        <p className={`text-sm font-medium ${dark ? 'text-white' : 'text-foreground'}`}>{message}</p>
+        <span className={`mx-auto flex h-11 w-11 items-center justify-center rounded-full ${
+          dark ? 'bg-accent-amber/15 ring-1 ring-accent-amber/40' : 'bg-accent-amber/10 ring-1 ring-accent-amber/30'
+        }`}>
+          <CheckCircle2 className="h-5 w-5 text-accent-amber" />
+        </span>
+        <p className={`mt-4 font-serif text-2xl tracking-tight ${dark ? 'text-white' : 'text-foreground'}`}>
+          You&apos;re on the list.
+        </p>
+        <p className={`mx-auto mt-2 max-w-sm text-sm leading-relaxed ${dark ? 'text-white/55' : 'text-foreground/55'}`}>
+          We just sent a welcome to your inbox. It has one small favor inside.
+        </p>
       </motion.div>
     )
   }

@@ -1,5 +1,3 @@
-import Link from 'next/link'
-import { Play } from 'lucide-react'
 import { WaitlistForm } from '@/components/WaitlistForm'
 import { Reveal } from './_shared'
 
@@ -24,19 +22,11 @@ export function FinalCTA() {
               Join the private beta and get a personal note from Puneet.
             </p>
 
-            <div className="mx-auto mt-10 max-w-md">
+            <div className="mx-auto mt-10 max-w-xl">
               <WaitlistForm tone="dark" />
             </div>
 
-            <Link
-              href="/f/demo"
-              className="group mt-6 inline-flex items-center gap-2 text-sm font-medium text-white/60 transition-colors hover:text-white"
-            >
-              <span className="flex h-7 w-7 items-center justify-center rounded-full border border-white/20 transition-colors group-hover:border-white/50">
-                <Play className="h-3 w-3 fill-current" />
-              </span>
-              Try a live demo first
-            </Link>
+            <p className="mt-6 text-sm text-white/40">Free during beta. No credit card.</p>
           </div>
         </div>
       </Reveal>

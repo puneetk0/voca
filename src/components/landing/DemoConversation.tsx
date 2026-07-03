@@ -158,7 +158,7 @@ export default function DemoConversation() {
             <span className="h-2.5 w-2.5 rounded-full bg-foreground/12" />
             <span className="h-2.5 w-2.5 rounded-full bg-foreground/12" />
           </div>
-          <span className="font-mono text-[11px] text-foreground/30">voca.app/f/demo</span>
+          <span className="font-mono text-[11px] text-foreground/30">voca.app/f/your-form</span>
         </div>
 
         <div className="grid items-center gap-8 p-8 sm:p-10 md:grid-cols-[minmax(0,300px)_1fr] md:gap-12">

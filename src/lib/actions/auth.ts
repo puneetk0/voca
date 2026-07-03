@@ -14,13 +14,10 @@ export async function authenticateWithPassword(formData: FormData) {
     return { error: 'Email and password are required' }
   }
 
+  // Invite-only beta: signups are disabled server-side (not just hidden in
+  // the UI). Accounts are provisioned manually for now.
   if (mode === 'signup') {
-    const { data, error } = await supabase.auth.signUp({ email, password })
-    if (error) return { error: error.message }
-    if (!data.session) {
-      return { error: 'Account created safely! However, you must check your email to verify (or disable "Confirm Email" in your Supabase Auth Settings to login instantly).' }
-    }
-    return { success: true, isNewUser: true }
+    return { error: 'Voca is invite-only during the beta. Join the waitlist for access.' }
   }
 
   const { error } = await supabase.auth.signInWithPassword({ email, password })

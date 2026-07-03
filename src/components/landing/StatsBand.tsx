@@ -12,7 +12,7 @@ export function StatsBand() {
       <div className="mx-auto max-w-6xl px-6 py-20">
         <Reveal>
           <div className="flex flex-col items-center text-center">
-            <Eyebrow>Why it works</Eyebrow>
+            <Eyebrow n="05">Why it works</Eyebrow>
             <h2 className="mt-5 max-w-2xl font-serif text-3xl leading-tight tracking-tight text-foreground sm:text-4xl">
               Talking beats typing. The data agrees.
             </h2>

@@ -69,7 +69,7 @@ export function FAQ() {
     <section id="faq" className="mx-auto max-w-3xl px-6 py-24 scroll-mt-20">
       <Reveal>
         <div className="flex flex-col items-center text-center">
-          <Eyebrow>FAQ</Eyebrow>
+          <Eyebrow n="07">FAQ</Eyebrow>
           <h2 className="mt-5 font-serif text-3xl leading-tight tracking-tight text-foreground sm:text-4xl lg:text-5xl">
             Questions, answered
           </h2>

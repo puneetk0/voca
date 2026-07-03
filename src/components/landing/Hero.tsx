@@ -1,5 +1,3 @@
-import Link from 'next/link'
-import { Play } from 'lucide-react'
 import { WaitlistForm } from '@/components/WaitlistForm'
 import DemoConversation from './DemoConversation'
 import { Reveal } from './_shared'
@@ -30,24 +28,13 @@ export function Hero() {
         </Reveal>
 
         <Reveal delay={0.14}>
-          <div className="mx-auto mt-9 max-w-md">
+          <div className="mx-auto mt-9 max-w-xl">
             <WaitlistForm />
           </div>
         </Reveal>
 
         <Reveal delay={0.2}>
-          <div className="mt-5 flex items-center justify-center gap-5">
-            <Link
-              href="/f/demo"
-              className="group inline-flex items-center gap-2 text-sm font-semibold text-foreground transition-colors hover:text-accent-amber"
-            >
-              <span className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground/[0.06] transition-colors group-hover:bg-accent-amber/15">
-                <Play className="h-3 w-3 fill-current" />
-              </span>
-              Try it live
-            </Link>
-            <span className="text-sm text-foreground/45">Free during beta</span>
-          </div>
+          <p className="mt-5 text-sm text-foreground/45">Free during beta. No credit card.</p>
         </Reveal>
       </div>
 

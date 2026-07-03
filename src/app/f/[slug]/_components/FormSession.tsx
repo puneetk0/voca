@@ -23,6 +23,10 @@ const GHOST_MESSAGES = [
   'Almost there, one moment.',
 ]
 
+// 44-byte silent WAV: playing it inside a user gesture (or a permitted
+// autoplay) unlocks the audio element for all later TTS playback.
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
+
 // Generous budget: the server's worst case is ~8-12s (capped provider
 // timeouts). Aborting earlier only wastes the in-flight work and burns
 // rate limits with duplicate requests.
@@ -107,6 +111,14 @@ export default function FormSession({
   const sessionIdRef = useRef<string | null>(null)
   const maxFieldReachedRef = useRef(0)
 
+  // Direct entry: no choice screen. We auto-attempt the conversation on load;
+  // if the browser blocks audio without a gesture, the orb becomes the single
+  // "Tap to begin" and that tap doubles as the audio-unlock gesture.
+  const [started, setStarted] = useState(false)
+  const [needsTap, setNeedsTap] = useState(false)
+  const startedRef = useRef(false)
+  const autoStartRef = useRef(false)
+
   // Tracks the most recently confirmed answer to show between questions
   const [lastConfirmedAnswer, setLastConfirmedAnswer] = useState<{ label: string; value: string } | null>(null)
   const lastConfirmedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -139,6 +151,7 @@ export default function FormSession({
 
   useEffect(() => {
     store.init(form.id, fields)
+    store.setMode('voice') // direct entry — the choice screen is gone
     const fieldsByLabel = Object.fromEntries(
       fields.map(f => [f.label.toLowerCase().trim(), f.id])
     )
@@ -240,6 +253,29 @@ export default function FormSession({
     const t = setTimeout(() => setShowDoneHint(true), 2000)
     return () => clearTimeout(t)
   }, [voiceState])
+
+  // Begin the conversation exactly once (auto-start or first tap).
+  function beginSession() {
+    if (startedRef.current) return
+    startedRef.current = true
+    setStarted(true)
+    setNeedsTap(false)
+    handleInitialSequence()
+  }
+
+  // Auto-attempt on load: if the browser lets the silent unlock play without
+  // a gesture, start with zero taps; otherwise fall back to tap-to-begin.
+  useEffect(() => {
+    if (autoStartRef.current) return
+    autoStartRef.current = true
+    if (!audioRef.current) audioRef.current = new Audio()
+    const a = audioRef.current
+    a.src = SILENT_WAV
+    a.play()
+      .then(() => { a.src = ''; beginSession() })
+      .catch(() => { a.src = ''; setNeedsTap(true) })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // Optimistic thinking label shown while Gemini processes
   function getThinkingLabel(_fieldType: string, _transcript: string) {
@@ -677,83 +713,21 @@ export default function FormSession({
     )
   }
 
-  if (store.mode === 'choice') {
-    return (
-      <main className="min-h-[100dvh] flex flex-col items-center justify-center p-6 bg-background">
-        {previewBanner}
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="max-w-2xl w-full text-center space-y-10">
-          <div>
-            <h1 className="text-4xl sm:text-5xl font-serif font-medium tracking-tight mb-4">{form.title}</h1>
-            <p className="text-xl text-foreground/60 max-w-lg mx-auto">{form.description}</p>
-            {form.welcome_message && (
-              <p className="ai-text mt-5 text-base text-foreground/45 max-w-md mx-auto">
-                &ldquo;{form.welcome_message}&rdquo;
-              </p>
-            )}
-            {/* Time estimate: ~12s per spoken answer */}
-            <p className="mt-5 text-sm text-foreground/40 flex items-center justify-center gap-2">
-              <span>{fields.length} question{fields.length !== 1 ? 's' : ''}</span>
-              <span className="h-1 w-1 rounded-full bg-foreground/20" />
-              <span>about {Math.max(1, Math.round((fields.length * 12) / 60))} min</span>
-            </p>
-          </div>
-
-          {/* Language toggle */}
-          <div className="flex items-center justify-center gap-2">
-            <span className="text-xs text-foreground/40 font-sans mr-1">Language</span>
-            {(['hi', 'en'] as const).map(lang => (
-              <button
-                key={lang}
-                onClick={() => { setSelectedLang(lang); languageRef.current = lang; switchFillers(lang) }}
-                className={`px-4 py-1.5 rounded-full text-sm font-sans transition-all ${
-                  selectedLang === lang
-                    ? 'bg-foreground text-background shadow-sm'
-                    : 'bg-foreground/[0.05] text-foreground/50 hover:bg-foreground/[0.08] border border-foreground/10'
-                }`}
-              >
-                {lang === 'hi' ? 'हिंदी' : 'English'}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex flex-col items-center gap-3 max-w-xs mx-auto w-full">
-            <button
-              aria-label="Start voice mode"
-              onClick={() => {
-                if (!audioRef.current) {
-                  audioRef.current = new Audio()
-                  audioRef.current.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA='
-                  audioRef.current.play().catch(() => { })
-                  audioRef.current.src = ''
-                }
-                store.setMode('voice')
-                handleInitialSequence()
-              }}
-              className="group w-full flex flex-col items-center justify-center gap-4 p-8 rounded-3xl bg-accent-amber/10 text-accent-amber hover:bg-accent-amber/20 border border-accent-amber/20 transition-all font-medium h-[180px]"
-            >
-              <Mic className="h-10 w-10 group-hover:scale-110 transition-transform" />
-              <span className="text-lg">Talk with me</span>
-            </button>
-            <p className="text-xs text-foreground/30 font-sans">Text input always available during the conversation</p>
-          </div>
-        </motion.div>
-      </main>
-    )
-  }
-
-  if (store.mode === 'voice') {
+  if (store.mode === 'voice' || store.mode === 'choice') {
     const lastAiText = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text ?? ''
     const isThinking = voiceState === 'thinking' || voiceState === 'transcribing'
     const totalFields = fields.length
     const currentQuestionNum = Math.min(store.currentFieldIndex + 1, totalFields)
 
-    const orbColour = voiceState === 'speaking'
-      ? 'bg-gradient-to-br from-amber-400 to-orange-500 shadow-[0_0_80px_rgba(251,191,36,0.35)]'
-      : voiceState === 'listening'
-        ? 'bg-gradient-to-br from-lime-400 to-emerald-500 shadow-[0_0_80px_rgba(163,230,53,0.35)]'
-        : voiceState === 'error'
-          ? 'bg-red-500/80'
-          : 'bg-foreground/10 border border-foreground/10'
+    const orbColour = !started
+      ? 'bg-accent-amber/15 border border-accent-amber/30 shadow-[0_0_60px_rgba(234,140,20,0.2)]'
+      : voiceState === 'speaking'
+        ? 'bg-gradient-to-br from-amber-400 to-orange-500 shadow-[0_0_80px_rgba(251,191,36,0.35)]'
+        : voiceState === 'listening'
+          ? 'bg-gradient-to-br from-lime-400 to-emerald-500 shadow-[0_0_80px_rgba(163,230,53,0.35)]'
+          : voiceState === 'error'
+            ? 'bg-red-500/80'
+            : 'bg-foreground/10 border border-foreground/10'
 
     return (
       <main className="min-h-[100dvh] flex flex-col items-center justify-between p-6 pt-safe pb-safe bg-background overflow-hidden" role="main" aria-label={`Voice form: ${form.title}`}>
@@ -764,19 +738,23 @@ export default function FormSession({
             Audio unavailable, reading mode is on. Your mic still works.
           </div>
         )}
-        {/* Progress indicator */}
-        <div className="w-full max-w-sm pt-4">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-xs text-foreground/40 font-medium">Question {currentQuestionNum} of {totalFields}</span>
-            <span className="text-xs text-foreground/30">{Math.round((currentQuestionNum / totalFields) * 100)}%</span>
+        {/* Progress indicator (only once the conversation has begun) */}
+        {started ? (
+          <div className="w-full max-w-sm pt-4">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs text-foreground/40 font-medium">Question {currentQuestionNum} of {totalFields}</span>
+              <span className="text-xs text-foreground/30">{Math.round((currentQuestionNum / totalFields) * 100)}%</span>
+            </div>
+            <div className="h-1 w-full bg-foreground/10 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-accent-amber rounded-full transition-all duration-700"
+                style={{ width: `${(currentQuestionNum / totalFields) * 100}%` }}
+              />
+            </div>
           </div>
-          <div className="h-1 w-full bg-foreground/10 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-accent-amber rounded-full transition-all duration-700"
-              style={{ width: `${(currentQuestionNum / totalFields) * 100}%` }}
-            />
-          </div>
-        </div>
+        ) : (
+          <div className="w-full max-w-sm pt-4" />
+        )}
 
         {/* Ambient background glow — brighter, two-tone */}
         <div className={`fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] rounded-full blur-[140px] -z-10 transition-all duration-1000 pointer-events-none ${
@@ -789,8 +767,25 @@ export default function FormSession({
 
         <motion.div animate={{ opacity: 1 }} initial={{ opacity: 0 }} className="flex flex-col items-center gap-10 w-full max-w-sm mx-auto">
 
+          {/* Pre-start: the form's welcome header (replaces the old choice screen) */}
+          {!started && (
+            <div className="text-center">
+              <h1 className="text-3xl sm:text-4xl font-serif font-medium tracking-tight mb-3">{form.title}</h1>
+              {form.description && (
+                <p className="text-base text-foreground/55 max-w-xs mx-auto">{form.description}</p>
+              )}
+              <p className="mt-4 text-sm text-foreground/40 flex items-center justify-center gap-2">
+                <span>{fields.length} question{fields.length !== 1 ? 's' : ''}</span>
+                <span className="h-1 w-1 rounded-full bg-foreground/20" />
+                <span>about {Math.max(1, Math.round((fields.length * 12) / 60))} min</span>
+                <span className="h-1 w-1 rounded-full bg-foreground/20" />
+                <span>just talk</span>
+              </p>
+            </div>
+          )}
+
           {/* Current question text OR thinking dots */}
-          <div className="min-h-[80px] flex items-center justify-center w-full">
+          <div className={`${started ? 'min-h-[80px]' : 'hidden'} flex items-center justify-center w-full`}>
             <AnimatePresence mode="wait">
               {isThinking ? (
                 <motion.div
@@ -847,6 +842,15 @@ export default function FormSession({
             <motion.button
               aria-label={voiceState === 'listening' ? 'Stop recording' : voiceState === 'speaking' ? 'Skip the AI voice' : voiceState === 'error' ? 'Tap to retry recording' : 'Voice input orb'}
               onClick={() => {
+                if (!startedRef.current) {
+                  // First tap = the audio-unlock gesture + conversation start.
+                  if (!audioRef.current) audioRef.current = new Audio()
+                  audioRef.current.src = SILENT_WAV
+                  audioRef.current.play().catch(() => { })
+                  audioRef.current.src = ''
+                  beginSession()
+                  return
+                }
                 if (voiceState === 'listening') stopRecording()
                 if (voiceState === 'speaking') {
                   // Tap to skip the AI's speech.
@@ -879,6 +883,15 @@ export default function FormSession({
               }
               transition={{ repeat: isThinking ? Infinity : 0, duration: 1.4 }}
             >
+              {/* Pre-start invite */}
+              {!started && (
+                <motion.div
+                  animate={{ scale: [1, 1.08, 1] }}
+                  transition={{ repeat: Infinity, duration: 2.2, ease: 'easeInOut' }}
+                >
+                  <Mic className="h-9 w-9 text-accent-amber" />
+                </motion.div>
+              )}
               {/* Real frequency waveform from mic stream */}
               {voiceState === 'listening' && (
                 <Waveform stream={stream} isActive={true} color="rgba(0,0,0,0.65)" />
@@ -894,6 +907,30 @@ export default function FormSession({
               )}
             </motion.button>
           </div>
+
+          {/* Pre-start: tap invite + language choice */}
+          {!started && (
+            <div className="flex flex-col items-center gap-6 -mt-2">
+              <p className="text-sm font-medium text-foreground/60">
+                {needsTap ? 'Tap to begin' : 'Starting…'}
+              </p>
+              <div className="flex items-center gap-2">
+                {(['hi', 'en'] as const).map(lang => (
+                  <button
+                    key={lang}
+                    onClick={() => { setSelectedLang(lang); languageRef.current = lang; switchFillers(lang) }}
+                    className={`px-4 py-1.5 rounded-full text-sm font-sans transition-all ${
+                      selectedLang === lang
+                        ? 'bg-foreground text-background shadow-sm'
+                        : 'bg-foreground/[0.05] text-foreground/50 hover:bg-foreground/[0.08] border border-foreground/10'
+                    }`}
+                  >
+                    {lang === 'hi' ? 'हिंदी' : 'English'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* First-time affordance until the VAD proves it auto-stops */}
           <AnimatePresence>

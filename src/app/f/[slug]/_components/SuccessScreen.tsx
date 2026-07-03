@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo } from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
-import { ExternalLink, Loader2 } from 'lucide-react'
+import { CheckCircle2, Loader2 } from 'lucide-react'
 
 /** One-shot confetti burst — pure framer-motion, no dependency, honors reduced-motion. */
 function Confetti() {
@@ -107,47 +107,41 @@ export default function SuccessScreen({
         transition={{ delay: 0.2, duration: 0.7 }}
         className="text-center max-w-md w-full"
       >
-        <h2 className="text-4xl font-semibold tracking-tight mb-3 text-foreground">
+        <span className="mx-auto mb-7 flex h-14 w-14 items-center justify-center rounded-full bg-accent-amber/10 ring-1 ring-accent-amber/25">
+          <CheckCircle2 className="h-7 w-7 text-accent-amber" />
+        </span>
+
+        <h2 className="font-serif text-4xl font-medium tracking-tight mb-3 text-foreground">
           {userName ? `All set, ${userName.split(' ')[0]}.` : 'All done!'}
         </h2>
-
-        <p className="text-foreground/50 text-base mb-3">
-          {keyValue
-            ? `We've got everything we need.`
-            : `Your answers have been submitted to the creator of "${form.title}".`}
+        <p className="text-foreground/50 text-base mb-10">
+          {keyValue ? 'Your answers are in. Thank you for taking the time.' : 'Your answers are in. Thank you for taking the time.'}
         </p>
-        <p className="text-foreground/40 text-sm mb-2">
-          The form creator will be in touch if needed.
-        </p>
-        {submissionTime && (
-          <p className="text-foreground/25 text-xs mb-10 tabular-nums">
-            Submitted {submissionTime}{submissionId ? ` · ref ${submissionId.slice(0, 8)}` : ''}
-          </p>
-        )}
 
+        {/* Receipt */}
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.5, duration: 0.6 }}
-          className="p-6 rounded-2xl bg-accent-amber/[0.07] border border-accent-amber/15 text-left"
+          transition={{ delay: 0.45, duration: 0.6 }}
+          className="rounded-2xl border border-foreground/[0.08] bg-foreground/[0.02] px-6 py-5 text-left"
         >
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-xs font-semibold uppercase tracking-widest text-accent-amber">Filled with Voca</span>
-            <div className="flex-1 h-px bg-accent-amber/15" />
+          <div className="flex items-center justify-between gap-4 border-b border-foreground/[0.06] pb-3">
+            <span className="text-xs font-medium uppercase tracking-wider text-foreground/40">Form</span>
+            <span className="truncate text-sm font-medium text-foreground">{form.title}</span>
           </div>
-          <p className="text-base font-medium text-foreground mb-1">
-            The voice-first form builder.
-          </p>
-          <p className="text-sm text-foreground/50 mb-5">
-            Replace cold forms with warm AI conversations. Higher completion, richer data.
-          </p>
-          <a
-            href="/?ref=form_completion"
-            className="inline-flex items-center gap-2 bg-accent-amber text-black text-sm font-semibold px-5 py-2.5 rounded-full hover:opacity-90 transition-opacity"
-          >
-            Create your own — free <ExternalLink className="h-3.5 w-3.5" />
-          </a>
+          <div className="flex items-center justify-between gap-4 border-b border-foreground/[0.06] py-3">
+            <span className="text-xs font-medium uppercase tracking-wider text-foreground/40">Submitted</span>
+            <span className="text-sm text-foreground/70 tabular-nums">{submissionTime ?? 'Just now'}</span>
+          </div>
+          <div className="flex items-center justify-between gap-4 pt-3">
+            <span className="text-xs font-medium uppercase tracking-wider text-foreground/40">Reference</span>
+            <span className="font-mono text-sm text-foreground/70">{submissionId ? submissionId.slice(0, 8) : '—'}</span>
+          </div>
         </motion.div>
+
+        <p className="mt-10 text-xs text-foreground/30">
+          Powered by <a href="/?ref=form_completion" className="text-foreground/45 underline underline-offset-2 hover:text-accent-amber transition-colors">Voca</a> — create your own voice form
+        </p>
       </motion.div>
     </motion.main>
   )
