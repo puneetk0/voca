@@ -84,13 +84,13 @@ RULES:
 3. If the prompt mentions choosing between a fixed set of items → use "mcq".
 4. Never use "text" when "mcq" or "number" is more appropriate.
 5. "required" should be true unless the question is clearly optional.
-6. "welcome_message" is ONE short, warm spoken sentence the AI voice will open the conversation with. It should reference what the form is about. No emojis, no markdown, no questions.
+6. "welcome_message" is the spoken opening of the conversation: TWO short, warm sentences. Sentence 1 thanks them and names what this is about specifically ("Hi! Thank you so much for your interest in the GDG orientation."). Sentence 2 sets the expectation ("We'll ask a few quick questions to get to know you better."). No emojis, no markdown, no questions, written for the ear.
 
 OUTPUT — strictly valid JSON only, no markdown fences:
 {
   "title": "Form Title",
   "description": "Short description",
-  "welcome_message": "Hi! Thanks for taking a minute to share your thoughts on our beta.",
+  "welcome_message": "Hi! Thank you so much for your interest in our beta. We'll ask a few quick questions to get to know you better.",
   "fields": [
     { "label": "Full Name", "field_type": "text", "required": true },
     { "label": "Are you currently employed?", "field_type": "mcq", "required": true, "options": ["Yes", "No"] },

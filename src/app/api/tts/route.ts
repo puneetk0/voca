@@ -14,23 +14,34 @@ const ratelimit = redis ? new Ratelimit({
   limiter: Ratelimit.slidingWindow(500, "1 h"),
 }) : null
 
-// Strips markdown and truncates at a sentence boundary before 280 chars.
-// Shared between Sarvam (plain text) and Google TTS (wrapped in SSML).
+// Speakability normalizer. Bulbul v3 accepts up to 2500 chars per request, so
+// there is NO aggressive truncation here (a leftover 280-char cut used to
+// mutilate long welcome messages mid-sentence). We only trim past a generous
+// 2000-char safety cap, at a sentence boundary.
+const MAX_TTS_CHARS = 2000
+
 function cleanText(text: string): string {
   let t = text
     .replace(/\*\*/g, '')
     .replace(/\*/g, '')
     .replace(/`/g, '')
     .replace(/[—–]/g, ', ')
+    // Emails read terribly as raw tokens — speak them ("x at y dot com").
+    .replace(/\b([a-zA-Z0-9._%+-]+)@([a-zA-Z0-9.-]+)\.([a-zA-Z]{2,})\b/g, (_m, u, d, tld) =>
+      `${u} at ${d.replace(/\./g, ' dot ')} dot ${tld}`)
+    // Strip emojis / pictographs — they become noise or get spoken literally.
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
 
-  if (t.length > 280) {
+  if (t.length > MAX_TTS_CHARS) {
     const breakPoints = [...t.matchAll(/[.!?]\s/g)]
-    const lastBreak = [...breakPoints].reverse().find(m => (m.index ?? 0) < 280)
+    const lastBreak = [...breakPoints].reverse().find(m => (m.index ?? 0) < MAX_TTS_CHARS)
     if (lastBreak && lastBreak.index !== undefined) {
       t = t.slice(0, lastBreak.index + 1)
     } else {
-      const lastSpace = t.lastIndexOf(' ', 280)
-      t = lastSpace > 0 ? t.slice(0, lastSpace) : t.slice(0, 280)
+      const lastSpace = t.lastIndexOf(' ', MAX_TTS_CHARS)
+      t = lastSpace > 0 ? t.slice(0, lastSpace) : t.slice(0, MAX_TTS_CHARS)
     }
   }
 
@@ -70,12 +81,21 @@ export async function POST(req: Request) {
       }
     }
 
-    // Priority 1: Sarvam AI — built for Indian English, warm and natural.
-    // Configured via SARVAM_API_KEY env var (no per-user key needed for testing).
+    // Priority 1: Sarvam bulbul:v3 — natural prosody, best-in-class on
+    // abbreviations, numerics and code-mixing (the things v2 mangled).
+    // Configured via SARVAM_API_KEY; voice swappable via SARVAM_SPEAKER.
     const sarvamKey = process.env.SARVAM_API_KEY
     if (sarvamKey) {
-      // Pace tracks the form's tone: measured for professional, brisker for playful.
-      const pace = form.ai_tone === 'professional' ? 1.0 : form.ai_tone === 'playful' ? 1.1 : 1.05
+      // Tone shapes delivery: measured and steady for professional,
+      // brisker and more expressive for playful.
+      const tone: 'professional' | 'friendly' | 'playful' =
+        form.ai_tone === 'professional' || form.ai_tone === 'playful' ? form.ai_tone : 'friendly'
+      const { pace, temperature } = {
+        professional: { pace: 0.95, temperature: 0.4 },
+        friendly: { pace: 1.0, temperature: 0.6 },
+        playful: { pace: 1.05, temperature: 0.8 },
+      }[tone]
+
       const sarvamRes = await fetch('https://api.sarvam.ai/text-to-speech', {
         method: 'POST',
         headers: {
@@ -83,14 +103,13 @@ export async function POST(req: Request) {
           'api-subscription-key': sarvamKey,
         },
         body: JSON.stringify({
-          inputs: [cleanText(text)],
+          text: cleanText(text),
           target_language_code: lang === 'en' ? 'en-IN' : 'hi-IN',
-          speaker: 'anushka',
-          model: 'bulbul:v2',
-          pitch: 0,
+          model: 'bulbul:v3',
+          speaker: process.env.SARVAM_SPEAKER || 'priya',
           pace,
-          loudness: 1.5,
-          enable_preprocessing: true,
+          temperature,
+          speech_sample_rate: 24000,
         }),
       })
 

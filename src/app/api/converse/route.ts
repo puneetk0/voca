@@ -172,12 +172,16 @@ ${isHindi ? `- Respond in natural, conversational Hindi (Devanagari script) in s
 - displayedMessage MUST always be in English regardless of language.
 
 OPENING HOOK (ONLY on the very first turn — when conversation history is empty):
+This is the single most important line of the whole conversation. It must feel like a warm host greeting a guest, never a bot reading a title. Build it in THREE beats (up to 3 short sentences — the usual 2-sentence limit is relaxed for THIS turn only):
+1. Warm gratitude tied to what this is actually about${persona.aiContext?.trim() ? ' (use the CREATOR CONTEXT — name the event/purpose specifically)' : ` (use the form title "${formTitle}" naturally, never robotically)`}.
+2. Set the expectation in one friendly clause: a few quick questions to get to know them better.
+3. A soft bridge straight into the first question.
+GOLD STANDARD (match this energy and shape, adapted to THIS form):
+"Hi! Thank you so much for your interest in the GDG orientation. We'll ask a few quick questions to get to know you better. Why not start with your name?"
 ${persona.welcomeMessage?.trim()
-  ? `Open with this exact welcome from the form creator (translate it naturally to ${isHindi ? 'Hindi' : 'English'} if it isn't already): "${persona.welcomeMessage.trim()}". Then immediately ask the first field question.`
-  : `Open with exactly 2 sentences:
-1. A warm, contextual greeting that references what this form is about ("${formTitle}"). Sound like a friend, not a customer service agent.
-2. Immediately ask the first field question.`}
-Keep it natural. No word limits. Do NOT mention how long it will take. Do NOT ask about language.
+  ? `The form creator wrote this welcome — use it as beats 1 and 2 (translate naturally to ${isHindi ? 'Hindi' : 'English'} if needed), then add beat 3 yourself: "${persona.welcomeMessage.trim()}"`
+  : ''}
+Keep it natural. Do NOT mention how long it will take. Do NOT ask about language.
 extractedValues must be {} and nextFieldIndex must be 0.
 
 CORRECTION HANDLING (applies throughout the entire conversation):
@@ -203,11 +207,13 @@ ${TONE_PRESETS[persona.aiTone]}
 - If someone hesitates or rambles, be warm and accepting.
 - PROGRESS: once past the halfway point of the form, briefly acknowledge momentum ONCE ("more than halfway, this is quick") — never mention it again after that.
 
-FORMAT RULES (responses are read aloud — non-negotiable):
+FORMAT RULES (responses are read aloud by a voice engine — non-negotiable):
 - Zero markdown. No asterisks, lists, headers, bullets. Ever.
-- Maximum ONE question per response. Maximum TWO sentences total.
+- Maximum ONE question per response. Maximum TWO sentences total (except the opening turn, which may use three short ones).
 - Never end with more than one question mark.
 - No em dashes or en dashes. Use a comma or period instead.
+- WRITE FOR THE EAR: no parentheses, no slashes, no symbols like & or %. Spell short numbers as words ("ten", not "10") unless it's data like a phone number. Say email addresses in spoken form only when confirming ("john at gmail dot com").
+- Punctuate for breath: short sentences, commas where a human would pause.
 
 ${fieldRules}
 
@@ -323,10 +329,11 @@ export async function POST(req: Request) {
     const nextField = !isLastField ? fields[currentFieldIndex + 1] : null
     const nextFieldContext = nextField
       ? `After extracting the current answer, transition naturally into asking about: "${nextField.label}" (${nextField.field_type}). Reference their previous answer if it makes the transition feel connected.`
-      : `This is the LAST field. After extracting the answer, give a warm, specific sign-off in ONE sentence only.
-- If you know the user's name from the conversation history, USE it: "Thanks Puneet, we're all set!"
-- Reference something specific they told you — their city, their course, their farm size, their company. Make it feel like you actually listened, not a generic farewell.
-- No more questions. No "Hope to see you there!" unless the form context genuinely warrants it. Just a warm, real, specific human goodbye.`
+      : `This is the LAST field. After extracting the answer, close the conversation in TWO short sentences (the 2-sentence cap applies but use both):
+1. Personal thanks — use their name if you know it, and let it feel like you actually listened ("Thank you so much for your time, Puneet.").
+2. A forward-looking line grounded in the CREATOR CONTEXT or form purpose — for an event/orientation: "We really hope to see you there." For feedback: "Your thoughts genuinely help us improve." Never invent specifics that aren't in the context.
+GOLD STANDARD shape: "Thank you so much for your time, Puneet. We really hope to see you at the orientation!"
+- No more questions. No new information. Just a warm, human goodbye.`
 
     const userPrompt = [
       extraContext ?? '',
