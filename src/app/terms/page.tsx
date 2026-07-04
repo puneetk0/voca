@@ -62,7 +62,7 @@ export default function TermsPage() {
 
         <section>
           <h2 className="text-base font-semibold text-foreground mb-3">9. Contact</h2>
-          <p className="text-sm">Questions? Email us at <a href="mailto:hello@voca.app" className="text-accent-amber hover:underline">hello@voca.app</a>.</p>
+          <p className="text-sm">Questions? Email us at <a href="mailto:hello@vocaforms.tech" className="text-accent-amber hover:underline">hello@vocaforms.tech</a>.</p>
         </section>
       </div>
     </main>

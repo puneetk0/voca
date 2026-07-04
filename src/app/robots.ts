@@ -9,6 +9,6 @@ export default function robots(): MetadataRoute.Robots {
         disallow: ['/admin/', '/api/'],
       },
     ],
-    sitemap: `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://voca.app'}/sitemap.xml`,
+    sitemap: `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://vocaforms.tech'}/sitemap.xml`,
   }
 }

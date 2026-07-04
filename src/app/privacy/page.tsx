@@ -59,7 +59,7 @@ export default function PrivacyPage() {
 
         <section>
           <h2 className="text-base font-semibold text-foreground mb-3">Contact</h2>
-          <p className="text-sm">Questions about this policy? Email us at <a href="mailto:privacy@voca.app" className="text-accent-amber hover:underline">privacy@voca.app</a>.</p>
+          <p className="text-sm">Questions about this policy? Email us at <a href="mailto:privacy@vocaforms.tech" className="text-accent-amber hover:underline">privacy@vocaforms.tech</a>.</p>
         </section>
       </div>
     </main>

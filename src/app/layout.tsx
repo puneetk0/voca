@@ -18,7 +18,7 @@ const dmMono = DM_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? "https://voca.app"),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? "https://vocaforms.tech"),
   title: {
     default: "Voca — It's not a form. It's a conversation.",
     template: "%s — Voca",

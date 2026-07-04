@@ -18,7 +18,7 @@ export async function sendWaitlistWelcome(toEmail: string) {
   }
 
   const formUrl = process.env.WAITLIST_FORM_URL || null
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://voca.app'
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://vocaforms.tech'
 
   const favorHtml = formUrl
     ? `
@@ -139,7 +139,7 @@ export async function sendResponseNotification({
     })
     .join('\n')
 
-  const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://voca.app'}/admin/forms/${formId}`
+  const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://vocaforms.tech'}/admin/forms/${formId}`
 
   // Custom from-addresses need a verified domain in Resend; the resend.dev
   // default works out-of-box for testing.
