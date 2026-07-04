@@ -86,7 +86,9 @@ export async function sendWaitlistWelcome(toEmail: string) {
 </body>
 </html>`
 
-  await resend.emails.send({
+  // resend.emails.send resolves with { data, error } — it does NOT throw on
+  // API errors (e.g. unverified domain), so we must inspect `error` ourselves.
+  const { data, error } = await resend.emails.send({
     from: FROM(),
     to: [toEmail],
     subject: 'Welcome to Voca — you’re on the list',
@@ -101,6 +103,13 @@ export async function sendWaitlistWelcome(toEmail: string) {
       '— Voca',
     ].join('\n'),
   })
+
+  if (error) {
+    console.error('[Email] Resend rejected waitlist welcome:', JSON.stringify(error))
+    return { sent: false }
+  }
+  console.log('[Email] Waitlist welcome sent:', data?.id)
+  return { sent: true }
 }
 
 export async function sendResponseNotification({

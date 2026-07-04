@@ -1,6 +1,7 @@
 'use server'
 
 import { headers } from 'next/headers'
+import { after } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { sendWaitlistWelcome } from '@/lib/email'
 import { checkLimit, clientIp } from '@/lib/ratelimit'
@@ -35,11 +36,16 @@ export async function joinWaitlist(
     return { error: 'Something went wrong. Please try again in a moment.' }
   }
 
-  // First successful join → branded welcome (fire and forget; the signup
-  // must never fail because the email provider hiccuped)
-  sendWaitlistWelcome(cleaned).catch(err =>
-    console.error('[Waitlist] Welcome email failed:', err?.message),
-  )
+  // First successful join → branded welcome. after() runs post-response and
+  // keeps the serverless function alive until it finishes (a plain fire-and-
+  // forget promise gets dropped when the function freezes on Vercel).
+  after(async () => {
+    try {
+      await sendWaitlistWelcome(cleaned)
+    } catch (err: any) {
+      console.error('[Waitlist] Welcome email threw:', err?.message)
+    }
+  })
 
   return { success: true }
 }

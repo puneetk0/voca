@@ -3,7 +3,7 @@
 import { useState, useTransition, useRef } from 'react'
 import { joinWaitlist } from '@/lib/actions/waitlist'
 import { motion } from 'framer-motion'
-import { ArrowRight, CheckCircle2, Loader2 } from 'lucide-react'
+import { ArrowRight, CheckCircle2, Loader2, Mail } from 'lucide-react'
 
 export function WaitlistForm({ compact = false, tone = 'light' }: { compact?: boolean; tone?: 'light' | 'dark' }) {
   const dark = tone === 'dark'
@@ -37,22 +37,23 @@ export function WaitlistForm({ compact = false, tone = 'light' }: { compact?: bo
         initial={{ opacity: 0, scale: 0.97, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
-        className={`rounded-2xl border px-8 py-7 text-center ${
+        className={`relative mx-auto max-w-sm overflow-hidden rounded-2xl border px-6 py-6 text-center ${
           dark
-            ? 'border-white/10 bg-white/[0.04]'
-            : 'border-foreground/[0.08] bg-foreground/[0.02]'
+            ? 'border-accent-amber/20 bg-gradient-to-b from-accent-amber/[0.12] to-transparent'
+            : 'border-accent-amber/25 bg-gradient-to-b from-accent-amber/[0.08] to-transparent'
         }`}
       >
-        <span className={`mx-auto flex h-11 w-11 items-center justify-center rounded-full ${
-          dark ? 'bg-accent-amber/15 ring-1 ring-accent-amber/40' : 'bg-accent-amber/10 ring-1 ring-accent-amber/30'
-        }`}>
-          <CheckCircle2 className="h-5 w-5 text-accent-amber" />
+        {/* soft brand glow */}
+        <div aria-hidden className="pointer-events-none absolute inset-x-0 -top-16 h-32 bg-[radial-gradient(50%_100%_at_50%_100%,rgba(234,140,20,0.22),transparent)]" />
+        <span className="relative mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-accent-amber to-orange-500 shadow-[0_6px_20px_-6px_rgba(234,140,20,0.7)]">
+          <CheckCircle2 className="h-6 w-6 text-white" />
         </span>
-        <p className={`mt-4 font-serif text-2xl tracking-tight ${dark ? 'text-white' : 'text-foreground'}`}>
+        <p className={`relative mt-4 font-serif text-2xl tracking-tight ${dark ? 'text-white' : 'text-foreground'}`}>
           You&apos;re on the list.
         </p>
-        <p className={`mx-auto mt-2 max-w-sm text-sm leading-relaxed ${dark ? 'text-white/55' : 'text-foreground/55'}`}>
-          We just sent a welcome to your inbox. It has one small favor inside.
+        <p className={`relative mx-auto mt-1.5 flex items-center justify-center gap-1.5 text-sm ${dark ? 'text-white/55' : 'text-foreground/55'}`}>
+          <Mail className="h-3.5 w-3.5 shrink-0" />
+          Check your inbox for a welcome from us.
         </p>
       </motion.div>
     )
