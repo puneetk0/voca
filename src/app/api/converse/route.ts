@@ -3,6 +3,7 @@ import { supabaseAdmin } from '@/lib/supabase/admin'
 import { createClient } from '@/lib/supabase/server'
 import { callFastFirst } from '@/lib/llm'
 import { checkLimit, isAllowedOrigin, clientIp } from '@/lib/ratelimit'
+import { resolveNext, computePath, projectedTotal, hasBranching, type BranchField, type AnswerMap } from '@/lib/branching'
 import { Ratelimit } from "@upstash/ratelimit"
 import { Redis } from "@upstash/redis"
 
@@ -135,10 +136,22 @@ FIELD TYPE: Multiple Choice
 - Never extract a value for an MCQ field that is not one of the predefined options.`
   }
 
+  // Branching rules rendered human-readable so the LLM narrates transitions
+  // that match the routing — the actual routing is computed in code, never
+  // by the model.
   const fieldList = allFields.map((f, i) => {
     let ruleText = ''
-    if (f.logic_rules && f.logic_rules.length > 0) {
-      ruleText = ` [Branching Rules: ${JSON.stringify(f.logic_rules)}]`
+    if (Array.isArray(f.logic_rules) && f.logic_rules.length > 0) {
+      const routes = f.logic_rules
+        .filter((r: any) => r?.goto != null)
+        .map((r: any) => {
+          const label = r.option === '*' ? 'after answering' : `"${r.option}"`
+          if (r.goto === 'end') return `${label} → the form ENDS`
+          const t = allFields.findIndex(x => x.id === r.goto)
+          return t > i ? `${label} → skips to question ${t}` : null
+        })
+        .filter(Boolean)
+      if (routes.length > 0) ruleText = ` [Routing: ${routes.join('; ')}; other choices → next question]`
     }
     return `${i}. [ID: ${f.id}] ${f.label} (${f.field_type})${ruleText}`
   }).join('\n')
@@ -257,6 +270,8 @@ export async function POST(req: Request) {
       userEmail,
       confidence,
       currentLanguage,
+      answers: rawAnswers,
+      tappedOption: rawTappedOption,
     } = await req.json()
 
     // Server-side input caps — never trust client-declared sizes
@@ -311,6 +326,37 @@ export async function POST(req: Request) {
     }
 
     const currentField = fields[currentFieldIndex]
+    if (!currentField) {
+      return NextResponse.json({ error: 'Invalid field index.', code: 'bad_request' }, { status: 422 })
+    }
+
+    // ── Deterministic branching ──────────────────────────────────────────
+    // Answers so far (client-sent, server-sanitized) drive the path walk.
+    const validIds = new Set(fields.map(f => f.id))
+    const knownAnswers: AnswerMap = {}
+    if (rawAnswers && typeof rawAnswers === 'object') {
+      for (const [id, val] of Object.entries(rawAnswers).slice(0, 100)) {
+        if (validIds.has(id) && typeof val === 'string') knownAnswers[id] = val.slice(0, 500)
+      }
+    }
+    const branchFields = fields as BranchField[]
+    const branchingActive = hasBranching(branchFields)
+
+    // MCQ taps carry the exact chosen option — zero LLM trust needed for
+    // either the extraction or the routing. Accept the explicit param, or
+    // fall back to the legacy "[User tapped: X]" message shape.
+    const tapText = typeof rawTappedOption === 'string'
+      ? rawTappedOption
+      : (typeof rawUserMessage === 'string' ? /^\[User tapped: (.+)\]$/.exec(rawUserMessage.trim())?.[1] : undefined)
+    const canonicalOption = currentField.field_type === 'mcq' && tapText
+      ? (currentField.options ?? []).find((o: string) => o.trim().toLowerCase() === tapText.trim().toLowerCase()) ?? null
+      : null
+
+    // With a tap we know the route before the LLM even runs.
+    const tapResolvedNext = canonicalOption !== null
+      ? resolveNext(branchFields, currentFieldIndex, canonicalOption)
+      : null
+
     const isLastField = currentFieldIndex === fields.length - 1
 
     // Client sends the session language explicitly; the form's configured
@@ -339,20 +385,59 @@ export async function POST(req: Request) {
       .map((m: any) => `${m.role === 'ai' ? 'Assistant' : 'User'}: ${m.text.replace('[Voice] ', '')}`)
       .join('\n')
 
-    // Tell Gemini what's coming next so it can craft a natural transition
-    const nextField = !isLastField ? fields[currentFieldIndex + 1] : null
-    const nextFieldContext = nextField
-      ? `After extracting the current answer, transition naturally into asking about: "${nextField.label}" (${nextField.field_type}). Reference their previous answer if it makes the transition feel connected.`
-      : `This is the LAST field. After extracting the answer, close the conversation in TWO short sentences (the 2-sentence cap applies but use both):
+    // Tell the LLM what's coming next so it can craft a natural transition.
+    // With branching, "next" is computed here — the model narrates, code decides.
+    const closingContext = `After acknowledging the answer, close the conversation in TWO short sentences (the 2-sentence cap applies but use both):
 1. Personal thanks — use their name if you know it, and let it feel like you actually listened ("Thank you so much for your time, Puneet.").
 2. A forward-looking line grounded in the CREATOR CONTEXT or form purpose — for an event/orientation: "We really hope to see you there." For feedback: "Your thoughts genuinely help us improve." Never invent specifics that aren't in the context.
 GOLD STANDARD shape: "Thank you so much for your time, Puneet. We really hope to see you at the orientation!"
 - No more questions. No new information. Just a warm, human goodbye.`
 
+    const transitionTo = (f: { label: string; field_type: string }) =>
+      `After extracting the current answer, transition naturally into asking about: "${f.label}" (${f.field_type}). Reference their previous answer if it makes the transition feel connected.`
+
+    const currentRules: Array<{ option: string; goto: string | 'end' | null }> =
+      Array.isArray(currentField.logic_rules) ? currentField.logic_rules : []
+    const currentHasRouting = currentRules.some(r => r?.goto != null)
+
+    let nextFieldContext: string
+    if (tapResolvedNext !== null) {
+      // Tap path: route already resolved, tell the model exactly where we're going.
+      nextFieldContext = tapResolvedNext >= fields.length
+        ? `The user chose "${canonicalOption}". This was their FINAL question. ${closingContext}`
+        : transitionTo(fields[tapResolvedNext])
+    } else if (currentHasRouting && currentField.field_type === 'mcq') {
+      // Voice path on a branching mcq: the next question depends on the choice.
+      const optionMap = (currentField.options ?? []).map((opt: string) => {
+        const next = resolveNext(branchFields, currentFieldIndex, opt)
+        return next >= fields.length
+          ? `- If they choose "${opt}": this is their final answer — no next question.`
+          : `- If they choose "${opt}": the next question is "${fields[next].label}".`
+      }).join('\n')
+      nextFieldContext = `The next question DEPENDS on their choice:
+${optionMap}
+IMPORTANT: identify which option they chose, then in the SAME reply ask that option's next question. Choosing an option NEVER ends the conversation unless it is explicitly marked "no next question" above. Only when their choice is marked final: ${closingContext}`
+    } else if (currentHasRouting) {
+      // Non-mcq field with an answer-independent "after this →" rule.
+      const staticNext = resolveNext(branchFields, currentFieldIndex, ' ')
+      nextFieldContext = staticNext >= fields.length
+        ? `This is their FINAL question on this path. ${closingContext}`
+        : transitionTo(fields[staticNext])
+    } else if (!isLastField) {
+      nextFieldContext = transitionTo(fields[currentFieldIndex + 1])
+    } else {
+      nextFieldContext = `This is the LAST field. ${closingContext}`
+    }
+
+    // On branched forms the position/total follow the taken path, not the raw list
+    const pathSoFar = branchingActive ? computePath(branchFields, knownAnswers) : null
+    const questionNum = pathSoFar ? pathSoFar.visited.length : currentFieldIndex + 1
+    const questionTotal = pathSoFar ? projectedTotal(branchFields, knownAnswers) : fields.length
+
     const userPrompt = [
       typeof extraContext === 'string' ? extraContext.slice(0, 600) : '',
       `Current field: "${currentField.label}" (${currentField.field_type})`,
-      `Progress: question ${currentFieldIndex + 1} of ${fields.length}.`,
+      `Progress: question ${questionNum} of ${questionTotal}.`,
       nextFieldContext,
       '',
       'Conversation so far:',
@@ -409,11 +494,10 @@ GOLD STANDARD shape: "Thank you so much for your time, Puneet. We really hope to
 
     // Support legacy scalar extraction or new multi-intent map
     let sanitizedExtractedValues: Record<string, string> = {}
-    const validFieldIds = new Set(fields.map(f => f.id))
 
     if (parsed.extractedValues) {
       Object.entries(parsed.extractedValues).forEach(([id, val]) => {
-        if (validFieldIds.has(id)) {
+        if (validIds.has(id)) {
           sanitizedExtractedValues[id] = val as string
         } else {
           console.warn(`[Converse] AI hallucinated field ID: ${id}. Stripping.`)
@@ -423,10 +507,51 @@ GOLD STANDARD shape: "Thank you so much for your time, Puneet. We really hope to
       sanitizedExtractedValues[currentField.id] = parsed.extractedValue
     }
 
-    const nextIndex = parsed.nextFieldIndex !== undefined 
-      ? parsed.nextFieldIndex 
-      : (Object.keys(sanitizedExtractedValues).length > 0 ? Math.min(currentFieldIndex + 1, fields.length) : currentFieldIndex);
-      
+    // Anti-hallucination guard: an extraction for a field that is neither the
+    // current one nor previously answered is a fabricated forward-fill (the
+    // model inventing answers to questions never asked). On branched forms
+    // that can silently route to the wrong subtree or end the form. Corrections
+    // (rewriting an ALREADY-answered field) pass through untouched.
+    if (rawAnswers && typeof rawAnswers === 'object') {
+      for (const id of Object.keys(sanitizedExtractedValues)) {
+        if (id !== currentField.id && knownAnswers[id] === undefined) {
+          console.warn(`[Converse] Stripping fabricated answer for unasked field ${id}`)
+          delete sanitizedExtractedValues[id]
+        }
+      }
+    }
+
+    // A tap IS the answer — no LLM trust needed for the extraction.
+    if (canonicalOption !== null) {
+      sanitizedExtractedValues[currentField.id] = canonicalOption
+    }
+
+    // Routing decision. LLM's nextFieldIndex is the baseline; on branched
+    // forms the deterministic path computation overrides it.
+    let nextIndex: number = parsed.nextFieldIndex !== undefined
+      ? parsed.nextFieldIndex
+      : (Object.keys(sanitizedExtractedValues).length > 0 ? Math.min(currentFieldIndex + 1, fields.length) : currentFieldIndex)
+
+    if (tapResolvedNext !== null) {
+      nextIndex = tapResolvedNext
+    } else if (branchingActive) {
+      const extractedCurrent = sanitizedExtractedValues[currentField.id]
+      const correctedEarlierBranch = Object.keys(sanitizedExtractedValues).some(id => {
+        const idx = fields.findIndex(f => f.id === id)
+        return idx >= 0 && idx < currentFieldIndex &&
+          Array.isArray(fields[idx].logic_rules) && fields[idx].logic_rules.length > 0
+      })
+      if (rawAnswers && typeof rawAnswers === 'object' && (extractedCurrent !== undefined || correctedEarlierBranch)) {
+        // Full path walk: lands on the first unanswered on-path field. Also
+        // handles a correction flipping an earlier mcq onto a new branch.
+        nextIndex = computePath(branchFields, { ...knownAnswers, ...sanitizedExtractedValues }).frontier
+      } else if (extractedCurrent !== undefined && currentHasRouting) {
+        // No answers map from the client — resolve just this hop.
+        nextIndex = resolveNext(branchFields, currentFieldIndex, extractedCurrent)
+      }
+    }
+    nextIndex = Math.max(0, Math.min(Number.isInteger(nextIndex) ? nextIndex : currentFieldIndex, fields.length))
+
     // Epic 7: Confidence-based sentiment correction to prevent false positives
     let finalSentiment = parsed.sentiment || 'neutral'
     if (confidence !== undefined && confidence < 0.70) {
@@ -445,7 +570,13 @@ GOLD STANDARD shape: "Thank you so much for your time, Puneet. We really hope to
       nextFieldIndex: nextIndex,
       sentiment: finalSentiment,
       language: responseLanguage,
-      isComplete: isLastField && (hasExtracted || nextIndex >= fields.length),
+      // Branch-aware completion: on branched forms nextIndex is deterministic,
+      // so it alone decides — an early "end" route completes mid-list, and a
+      // correction that jumps BACK onto a new branch un-completes the last
+      // field. Linear forms keep the stricter last-field-only rule.
+      isComplete: branchingActive || tapResolvedNext !== null
+        ? nextIndex >= fields.length
+        : isLastField && (hasExtracted || nextIndex >= fields.length),
     })
 
   } catch (error: any) {

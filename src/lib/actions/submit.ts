@@ -1,6 +1,7 @@
 'use server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { sendResponseNotification } from '@/lib/email'
+import { onPathFieldIds, hasBranching, type BranchField } from '@/lib/branching'
 
 export async function submitResponse(formData: FormData) {
   const supabase = supabaseAdmin
@@ -33,11 +34,19 @@ export async function submitResponse(formData: FormData) {
   // 2. Fetch form info + valid fields in parallel
   const [formResult, fieldsResult] = await Promise.all([
     supabase.from('forms').select('user_id, title, email_notifications').eq('id', formId).single(),
-    supabase.from('fields').select('id, label').eq('form_id', formId),
+    supabase.from('fields').select('id, label, field_type, options, logic_rules').eq('form_id', formId).order('order_index'),
   ])
 
   const validFields = fieldsResult.data ?? []
-  const validFieldIds = new Set(validFields.map(f => f.id))
+  let validFieldIds = new Set(validFields.map(f => f.id))
+
+  // Branched forms: recompute the taken path server-side and drop answers
+  // for fields that aren't on it (e.g. orphaned by a corrected branch choice).
+  // Never trust the client to have filtered.
+  if (hasBranching(validFields as BranchField[])) {
+    const onPath = onPathFieldIds(validFields as BranchField[], answers)
+    validFieldIds = new Set([...validFieldIds].filter(id => onPath.has(id)))
+  }
 
   // 3. Insert Answers (with optional audio URLs)
   const answersToInsert = (await Promise.all(
@@ -124,7 +133,10 @@ export async function submitResponse(formData: FormData) {
         formTitle: title,
         formId,
         fields: validFields,
-        answers,
+        // Same path filter as the insert — off-path answers stay out of the email
+        answers: Object.fromEntries(
+          Object.entries(answers as Record<string, string>).filter(([id]) => validFieldIds.has(id)),
+        ),
       })
     }).catch(err => console.error('[Email] Failed to send response notification:', err))
   }
