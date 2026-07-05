@@ -1,20 +1,12 @@
 'use server'
 
 import { supabaseAdmin } from '@/lib/supabase/admin'
-import { createClient } from '@/lib/supabase/server'
+import { requireFormRole } from '@/lib/authz'
 
 export async function exportFormCSV(formId: string, formTitle: string): Promise<string> {
-  // Security: verify the calling user owns this form before exposing any data
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) throw new Error('Unauthorized')
-
-  const { data: ownership } = await supabaseAdmin
-    .from('forms')
-    .select('user_id')
-    .eq('id', formId)
-    .single()
-  if (!ownership || ownership.user_id !== user.id) throw new Error('Unauthorized')
+  // Security: any form member (viewer and up) may export — they can already
+  // see this data on the Results tab.
+  await requireFormRole(formId, 'viewer')
 
   // 1. Fetch fields (ordered)
   const { data: fields } = await supabaseAdmin

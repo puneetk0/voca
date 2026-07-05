@@ -2,11 +2,15 @@ import { createClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import EditForm from '@/components/admin/EditForm'
 import type { BuilderSchema } from '@/components/admin/FormBuilder'
+import { getFormRole } from '@/lib/authz'
 
 export default async function EditFormPage({ params }: { params: Promise<{ id: string }> }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
   const { id } = await params
+
+  // Editing requires moderator or owner
+  const access = await getFormRole(id)
+  if (!access || access.role === 'viewer') redirect('/admin')
 
   // select('*') stays resilient if migration 0002 hasn't run yet
   const { data: form, error: formError } = await supabase
@@ -15,7 +19,7 @@ export default async function EditFormPage({ params }: { params: Promise<{ id: s
     .eq('id', id)
     .single()
 
-  if (formError || !form || form.user_id !== user?.id) redirect('/admin')
+  if (formError || !form) redirect('/admin')
 
   const { data: fields } = await supabase
     .from('fields')

@@ -10,6 +10,7 @@ import { getFormHealth } from '@/lib/actions/health'
 import { ArrowLeft } from 'lucide-react'
 import type { FieldInsight, SessionAnalytics } from '@/components/admin/insights'
 import { hasBranching } from '@/lib/branching'
+import { getFormRole } from '@/lib/authz'
 
 export default async function FormDashboard({
   params,
@@ -19,7 +20,6 @@ export default async function FormDashboard({
   searchParams: Promise<Record<string, string>>
 }) {
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
   const { id } = await params
   const search = await searchParams
   const isNew = search?.new === '1'
@@ -37,7 +37,12 @@ export default async function FormDashboard({
     .eq('id', id)
     .single()
 
-  if (formError || form.user_id !== user?.id) redirect('/admin')
+  if (formError || !form) redirect('/admin')
+
+  // Owner or team member (moderator/viewer) — anyone else bounces
+  const access = await getFormRole(id)
+  if (!access) redirect('/admin')
+  const role = access.role
 
   const { data: fields } = await supabase
     .from('fields')

@@ -1,6 +1,7 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { requireFormRole } from '@/lib/authz'
 import { validateLogicRules, ANY_OPTION, type LogicRule, type BranchField } from '@/lib/branching'
 
 interface FieldInput {
@@ -132,14 +133,8 @@ import { revalidatePath } from 'next/cache'
 
 export async function toggleFormStatus(formId: string, isActive: boolean) {
   try {
+    await requireFormRole(formId, 'moderator')
     const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-
-    if (!user) throw new Error('Unauthorized')
-
-    // Verify ownership
-    const { data: form } = await supabase.from('forms').select('user_id').eq('id', formId).single()
-    if (form?.user_id !== user.id) throw new Error('Unauthorized')
 
     const { error } = await supabase
       .from('forms')
@@ -158,14 +153,8 @@ export async function toggleFormStatus(formId: string, isActive: boolean) {
 
 export async function deleteForm(formId: string) {
   try {
+    await requireFormRole(formId, 'owner')
     const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-
-    if (!user) throw new Error('Unauthorized')
-
-    // Verify ownership
-    const { data: form } = await supabase.from('forms').select('user_id').eq('id', formId).single()
-    if (form?.user_id !== user.id) throw new Error('Unauthorized')
 
     const { error } = await supabase
       .from('forms')
@@ -189,13 +178,8 @@ export async function updateForm(
   persona?: FormPersona,
 ) {
   try {
+    await requireFormRole(formId, 'moderator')
     const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) throw new Error('Unauthorized')
-
-    // Verify ownership
-    const { data: form } = await supabase.from('forms').select('user_id').eq('id', formId).single()
-    if (form?.user_id !== user.id) throw new Error('Unauthorized')
 
     if (!fields || fields.length === 0) throw new Error('A form must have at least one field.')
 
@@ -273,13 +257,8 @@ export async function updateFormSettings(
   settings: { redirect_url?: string | null; email_notifications?: boolean },
 ) {
   try {
+    await requireFormRole(formId, 'moderator')
     const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) throw new Error('Unauthorized')
-
-    // Verify ownership
-    const { data: form } = await supabase.from('forms').select('user_id').eq('id', formId).single()
-    if (form?.user_id !== user.id) throw new Error('Unauthorized')
 
     const update: { redirect_url?: string | null; email_notifications?: boolean; updated_at: string } = {
       updated_at: new Date().toISOString(),
@@ -320,13 +299,8 @@ export async function updateFormSettings(
 
 export async function updateFormSlug(formId: string, rawSlug: string) {
   try {
+    await requireFormRole(formId, 'moderator')
     const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) throw new Error('Unauthorized')
-
-    // Verify ownership
-    const { data: form } = await supabase.from('forms').select('user_id').eq('id', formId).single()
-    if (form?.user_id !== user.id) throw new Error('Unauthorized')
 
     // Slugify: lowercase, replace spaces/special chars with hyphens, trim hyphens
     const slug = rawSlug.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')

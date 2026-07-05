@@ -1,16 +1,33 @@
 import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
-import { Plus, MessageSquare } from 'lucide-react'
+import { Plus, MessageSquare, Users } from 'lucide-react'
 
 export default async function AdminDashboard() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
 
-  const { data: forms } = await supabase
-    .from('forms')
-    .select('id, title, created_at, is_active, responses(count)')
-    .eq('user_id', user?.id)
-    .order('created_at', { ascending: false })
+  // Owned forms + forms shared via team membership. Keep the .eq on the owned
+  // query — the public "active forms" SELECT policy would otherwise leak every
+  // active form on the platform into this list.
+  const [{ data: ownedForms }, { data: memberships }] = await Promise.all([
+    supabase
+      .from('forms')
+      .select('id, title, created_at, is_active, responses(count)')
+      .eq('user_id', user?.id)
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('form_members')
+      .select('role, forms(id, title, created_at, is_active, responses(count))'),
+  ])
+
+  type FormCard = { id: string; title: string; created_at: string; is_active: boolean; responses?: { count: number }[]; sharedRole?: string }
+  const shared: FormCard[] = (memberships ?? [])
+    .map((m: any) => (m.forms ? { ...m.forms, sharedRole: m.role } : null))
+    .filter(Boolean) as FormCard[]
+  const forms: FormCard[] = [
+    ...((ownedForms ?? []) as FormCard[]),
+    ...shared.sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? '')),
+  ]
 
   return (
     <main className="max-w-5xl mx-auto py-10 px-6">
@@ -50,8 +67,15 @@ export default async function AdminDashboard() {
                 className="bg-foreground/[0.02] border border-foreground/[0.08] p-5 rounded-2xl hover:border-foreground/20 hover:-translate-y-0.5 hover:bg-foreground/[0.04] transition-all duration-200 group"
               >
                 <div className="flex items-center justify-between mb-4">
-                  <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${form.is_active ? 'bg-accent-sage/10 text-accent-sage ring-accent-sage/20' : 'bg-foreground/8 text-foreground/50 ring-foreground/15'}`}>
-                    {form.is_active ? 'Active' : 'Draft'}
+                  <span className="flex items-center gap-1.5">
+                    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset ${form.is_active ? 'bg-accent-sage/10 text-accent-sage ring-accent-sage/20' : 'bg-foreground/8 text-foreground/50 ring-foreground/15'}`}>
+                      {form.is_active ? 'Active' : 'Draft'}
+                    </span>
+                    {form.sharedRole && (
+                      <span className="inline-flex items-center gap-1 rounded-full bg-accent-amber/10 px-2.5 py-0.5 text-xs font-medium text-accent-amber ring-1 ring-inset ring-accent-amber/20" title={`Shared with you as ${form.sharedRole}`}>
+                        <Users className="h-3 w-3" /> {form.sharedRole}
+                      </span>
+                    )}
                   </span>
                   <span className="text-2xl font-bold tabular-nums text-foreground/90">{count}</span>
                 </div>

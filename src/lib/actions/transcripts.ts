@@ -1,26 +1,24 @@
 'use server'
 
-import { createClient } from '@/lib/supabase/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
+import { getFormRole } from '@/lib/authz'
 
 export type TranscriptMessage = { id?: string; role: string; text: string }
 
-// Defense in depth: RLS already restricts transcripts to the form owner, but
-// we verify ownership explicitly too — a misconfigured policy must not turn
-// into a data leak.
+// Defense in depth: RLS already restricts transcripts to form members, but
+// we verify access explicitly too — a misconfigured policy must not turn
+// into a data leak. Viewers and above may read transcripts.
 export async function getResponseTranscript(responseId: string) {
   try {
-    const supabase = await createClient()
-    const { data: { user } } = await supabase.auth.getUser()
-    if (!user) return { messages: null }
-
     const { data: row } = await supabaseAdmin
       .from('responses')
-      .select('form_id, forms!inner(user_id)')
+      .select('form_id')
       .eq('id', responseId)
       .single()
-    const ownerId = (row as any)?.forms?.user_id
-    if (!ownerId || ownerId !== user.id) return { messages: null }
+    if (!row?.form_id) return { messages: null }
+
+    const access = await getFormRole(row.form_id)
+    if (!access) return { messages: null }
 
     const { data } = await supabaseAdmin
       .from('transcripts')
