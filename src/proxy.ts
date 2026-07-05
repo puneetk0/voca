@@ -1,10 +1,10 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
-// Edge-level gate for /admin routes.
-// This runs before any server component renders, so unauthorised users
-// are bounced before they incur any DB reads.
-export async function middleware(request: NextRequest) {
+// Edge-level gate for /admin routes (proxy is the renamed middleware
+// convention in this Next version). Runs before any server component
+// renders, so unauthorised users are bounced before they incur DB reads.
+export async function proxy(request: NextRequest) {
   // Build a mutable response we can attach refreshed cookies to
   let supabaseResponse = NextResponse.next({ request })
 
@@ -56,9 +56,33 @@ export async function middleware(request: NextRequest) {
       .filter(Boolean)
 
     const isProd = process.env.NODE_ENV === 'production'
-    const isAllowed = allowedEmails.length === 0
+    let isAllowed = allowedEmails.length === 0
       ? !isProd  // dev: allow; prod: deny
       : allowedEmails.includes(user.email?.toLowerCase() ?? '')
+
+    // Team members aren't on the env allowlist — fall back to a membership
+    // check. Cookie-cached (5 min) so repeat navigations skip the query;
+    // allowlisted users never reach this code at all.
+    if (!isAllowed) {
+      if (request.cookies.get('voca_member')?.value === '1') {
+        isAllowed = true
+      } else {
+        const { data } = await supabase
+          .from('form_members')     // RLS: members see only their own rows
+          .select('form_id')
+          .limit(1)
+        if (data && data.length > 0) {
+          isAllowed = true
+          supabaseResponse.cookies.set('voca_member', '1', {
+            httpOnly: true,
+            sameSite: 'lax',
+            secure: isProd,
+            maxAge: 300,
+            path: '/admin',
+          })
+        }
+      }
+    }
 
     if (!isAllowed) {
       return NextResponse.redirect(new URL('/?access=denied', request.url))

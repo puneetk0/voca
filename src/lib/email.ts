@@ -112,6 +112,113 @@ export async function sendWaitlistWelcome(toEmail: string) {
   return { sent: true }
 }
 
+/**
+ * Team invite: brand-styled email with a single CTA to the token link.
+ * The raw token only ever lives in this email — the DB stores its hash.
+ */
+export async function sendTeamInvite({
+  toEmail,
+  formTitle,
+  inviterEmail,
+  role,
+  inviteUrl,
+}: {
+  toEmail: string
+  formTitle: string
+  inviterEmail: string
+  role: 'moderator' | 'viewer'
+  inviteUrl: string
+}) {
+  if (!resend) {
+    console.warn('[Email] RESEND_API_KEY not set — skipping team invite')
+    return { sent: false }
+  }
+
+  const roleLine = role === 'moderator'
+    ? 'As a moderator you can edit the form, manage its settings, and see every response.'
+    : 'As a viewer you can see responses and analytics, read-only.'
+  const safeTitle = formTitle.replace(/</g, '&lt;')
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#f5f2ee;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f5f2ee;padding:40px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;width:100%;">
+          <tr>
+            <td style="padding:0 8px 28px;">
+              <span style="font-family:Georgia,'Times New Roman',serif;font-size:24px;font-weight:700;color:#111111;">Voca</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#ffffff;border:1px solid rgba(17,17,17,0.07);border-radius:20px;padding:44px 40px;">
+              <h1 style="margin:0 0 18px;font-family:Georgia,'Times New Roman',serif;font-size:28px;line-height:1.25;font-weight:600;color:#111111;">
+                You&rsquo;ve been invited.
+              </h1>
+              <p style="margin:0 0 12px;font-family:Georgia,'Times New Roman',serif;font-size:17px;line-height:1.65;color:#3d3a33;">
+                <strong>${inviterEmail}</strong> invited you to join
+                <strong>&ldquo;${safeTitle}&rdquo;</strong> on Voca as a <strong>${role}</strong>.
+              </p>
+              <p style="margin:0 0 12px;font-family:Georgia,'Times New Roman',serif;font-size:17px;line-height:1.65;color:#3d3a33;">
+                ${roleLine}
+              </p>
+              <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;">
+                <tr>
+                  <td style="border-radius:999px;background:#c96a00;">
+                    <a href="${inviteUrl}" style="display:inline-block;padding:13px 30px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:999px;">
+                      Accept invitation &rarr;
+                    </a>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin:16px 0 0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#8a836f;">
+                This link expires in 7 days. If you weren&rsquo;t expecting it, you can safely ignore this email.
+              </p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:26px 8px 0;">
+              <p style="margin:0;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#8a836f;">
+                It's not a form. It's a conversation.<br/>
+                <a href="${process.env.NEXT_PUBLIC_APP_URL ?? 'https://vocaforms.tech'}" style="color:#c96a00;text-decoration:none;">voca</a> &middot; built in India
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`
+
+  const { data, error } = await resend.emails.send({
+    from: FROM(),
+    to: [toEmail],
+    subject: `${inviterEmail} invited you to "${formTitle}" on Voca`,
+    html,
+    text: [
+      `${inviterEmail} invited you to join "${formTitle}" on Voca as a ${role}.`,
+      '',
+      roleLine,
+      '',
+      `Accept the invitation: ${inviteUrl}`,
+      '',
+      'This link expires in 7 days. If you were not expecting it, you can ignore this email.',
+      '',
+      '— Voca',
+    ].join('\n'),
+  })
+
+  if (error) {
+    console.error('[Email] Resend rejected team invite:', JSON.stringify(error))
+    return { sent: false }
+  }
+  console.log('[Email] Team invite sent:', data?.id)
+  return { sent: true }
+}
+
 export async function sendResponseNotification({
   toEmail,
   formTitle,
