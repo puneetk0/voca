@@ -11,6 +11,7 @@ import { ArrowLeft } from 'lucide-react'
 import type { FieldInsight, SessionAnalytics } from '@/components/admin/insights'
 import { hasBranching } from '@/lib/branching'
 import { getFormRole } from '@/lib/authz'
+import { getMembersData } from '@/lib/actions/members'
 
 export default async function FormDashboard({
   params,
@@ -23,7 +24,7 @@ export default async function FormDashboard({
   const { id } = await params
   const search = await searchParams
   const isNew = search?.new === '1'
-  const validTabs = ['summary', 'results', 'insights', 'settings'] as const
+  const validTabs = ['summary', 'results', 'insights', 'settings', 'members'] as const
   const initialTab = (validTabs as readonly string[]).includes(search?.tab) ? (search.tab as typeof validTabs[number]) : 'summary'
 
   const hdrs = await headers()
@@ -43,6 +44,12 @@ export default async function FormDashboard({
   const access = await getFormRole(id)
   if (!access) redirect('/admin')
   const role = access.role
+
+  // Members panel data (owner-only; errors gracefully to null pre-migration)
+  let membersData = null
+  if (role === 'owner') {
+    try { membersData = await getMembersData(id) } catch { membersData = null }
+  }
 
   const { data: fields } = await supabase
     .from('fields')
@@ -255,6 +262,8 @@ export default async function FormDashboard({
           appUrl,
           hasResponses: allResponses.length > 0,
         }}
+        role={role}
+        membersData={membersData}
       />
     </main>
   )

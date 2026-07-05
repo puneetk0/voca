@@ -18,6 +18,8 @@ interface Props {
   emailNotifications: boolean
   appUrl: string
   hasResponses: boolean
+  /** Danger zone (delete form) is owner-only; moderators see everything else */
+  canDelete?: boolean
 }
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
@@ -31,7 +33,7 @@ function Section({ title, description, children }: { title: string; description?
 }
 
 export default function SettingsPanel({
-  formId, formTitle, slug, isActive, redirectUrl, emailNotifications, appUrl, hasResponses,
+  formId, formTitle, slug, isActive, redirectUrl, emailNotifications, appUrl, hasResponses, canDelete = true,
 }: Props) {
   const router = useRouter()
 
@@ -228,7 +230,8 @@ export default function SettingsPanel({
         </div>
       </Section>
 
-      {/* Danger zone */}
+      {/* Danger zone — owner only */}
+      {canDelete && (
       <Section title="Danger zone">
         <button
           onClick={handleDelete}
@@ -240,6 +243,7 @@ export default function SettingsPanel({
         </button>
         <p className="text-xs text-foreground/40 mt-2">Permanently deletes this form and all its responses.</p>
       </Section>
+      )}
     </div>
   )
 }

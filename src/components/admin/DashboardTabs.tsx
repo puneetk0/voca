@@ -2,21 +2,26 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { BarChart3, ListChecks, LineChart, Settings2 } from 'lucide-react'
+import { BarChart3, ListChecks, LineChart, Settings2, Users } from 'lucide-react'
 import SummaryPanel from './SummaryPanel'
 import InsightsPanel from './InsightsPanel'
 import ResponsesTable from './ResponsesTable'
 import SettingsPanel from './SettingsPanel'
+import MembersPanel, { type MemberRow, type InviteRow } from './MembersPanel'
 import type { FieldInsight, SessionAnalytics } from './insights'
 
-type Tab = 'summary' | 'results' | 'insights' | 'settings'
+type Tab = 'summary' | 'results' | 'insights' | 'settings' | 'members'
+export type DashboardRole = 'owner' | 'moderator' | 'viewer'
 
-const TABS: { id: Tab; label: string; icon: typeof BarChart3 }[] = [
-  { id: 'summary', label: 'Summary', icon: BarChart3 },
-  { id: 'results', label: 'Results', icon: ListChecks },
-  { id: 'insights', label: 'Insights', icon: LineChart },
-  { id: 'settings', label: 'Settings', icon: Settings2 },
+const TABS: { id: Tab; label: string; icon: typeof BarChart3; minRole: DashboardRole }[] = [
+  { id: 'summary', label: 'Summary', icon: BarChart3, minRole: 'viewer' },
+  { id: 'results', label: 'Results', icon: ListChecks, minRole: 'viewer' },
+  { id: 'insights', label: 'Insights', icon: LineChart, minRole: 'viewer' },
+  { id: 'settings', label: 'Settings', icon: Settings2, minRole: 'moderator' },
+  { id: 'members', label: 'Members', icon: Users, minRole: 'owner' },
 ]
+
+const RANK: Record<DashboardRole, number> = { viewer: 1, moderator: 2, owner: 3 }
 
 interface Props {
   initialTab: Tab
@@ -49,11 +54,17 @@ interface Props {
     appUrl: string
     hasResponses: boolean
   }
+  role: DashboardRole
+  membersData: { members: MemberRow[]; invites: InviteRow[] } | null
 }
 
-export default function DashboardTabs({ initialTab, summary, session, fieldInsights, results, settings }: Props) {
+export default function DashboardTabs({ initialTab, summary, session, fieldInsights, results, settings, role, membersData }: Props) {
   const router = useRouter()
-  const [tab, setTab] = useState<Tab>(initialTab)
+  // Role-gate the tab list AND the initial tab (a viewer deep-linking
+  // ?tab=settings lands on Summary instead).
+  const visibleTabs = TABS.filter(t => RANK[role] >= RANK[t.minRole])
+  const safeInitial = visibleTabs.some(t => t.id === initialTab) ? initialTab : 'summary'
+  const [tab, setTab] = useState<Tab>(safeInitial)
 
   function selectTab(t: Tab) {
     setTab(t)
@@ -64,7 +75,7 @@ export default function DashboardTabs({ initialTab, summary, session, fieldInsig
     <div>
       {/* Tab bar */}
       <div className="flex items-center gap-1 border-b border-foreground/10 mb-8 overflow-x-auto">
-        {TABS.map(({ id, label, icon: Icon }) => {
+        {visibleTabs.map(({ id, label, icon: Icon }) => {
           const activeTab = tab === id
           return (
             <button
@@ -109,7 +120,13 @@ export default function DashboardTabs({ initialTab, summary, session, fieldInsig
         </div>
       )}
 
-      {tab === 'settings' && <SettingsPanel {...settings} />}
+      {tab === 'settings' && RANK[role] >= RANK.moderator && (
+        <SettingsPanel {...settings} canDelete={role === 'owner'} />
+      )}
+
+      {tab === 'members' && role === 'owner' && membersData && (
+        <MembersPanel formId={results.formId} members={membersData.members} invites={membersData.invites} />
+      )}
     </div>
   )
 }
