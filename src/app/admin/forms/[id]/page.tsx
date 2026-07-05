@@ -9,6 +9,7 @@ import DashboardTabs from '@/components/admin/DashboardTabs'
 import { getFormHealth } from '@/lib/actions/health'
 import { ArrowLeft } from 'lucide-react'
 import type { FieldInsight, SessionAnalytics } from '@/components/admin/insights'
+import { hasBranching } from '@/lib/branching'
 
 export default async function FormDashboard({
   params,
@@ -186,6 +187,7 @@ export default async function FormDashboard({
       avgDurationMs,
       medianDurationMs,
       funnel,
+      branched: hasBranching(allFields),
       devices: tallyBy(sessions, s => s.device_type),
       browsers: tallyBy(sessions, s => s.browser),
     }

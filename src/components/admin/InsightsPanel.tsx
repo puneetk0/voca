@@ -102,6 +102,11 @@ export default function InsightsPanel({ fieldInsights, session }: Props) {
             {/* Drop-off funnel */}
             <div className="bg-foreground/[0.02] border border-foreground/10 rounded-2xl p-5">
               <p className="text-xs font-medium uppercase tracking-wide text-foreground/40 mb-4">Drop-off by question</p>
+              {session!.branched && (
+                <p className="mb-3 -mt-2 text-[11px] text-foreground/35">
+                  This form branches — some questions are intentionally skipped, so lower bars aren&apos;t always drop-off.
+                </p>
+              )}
               {session!.funnel.length > 0 ? (
                 <div className="space-y-2.5">
                   {session!.funnel.map(step => {

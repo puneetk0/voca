@@ -86,16 +86,23 @@ RULES:
 5. "required" should be true unless the question is clearly optional.
 6. "welcome_message" is the spoken opening of the conversation: TWO short, warm sentences. Sentence 1 thanks them and names what this is about specifically ("Hi! Thank you so much for your interest in the GDG orientation."). Sentence 2 sets the expectation ("We'll ask a few quick questions to get to know you better."). No emojis, no markdown, no questions, written for the ear.
 
-OUTPUT — strictly valid JSON only, no markdown fences:
+BRANCHING (only when the prompt implies conditional flow — "if they say no, ask why", follow-ups that only apply to some answers, early exits):
+- A field may carry "branches": routing for what comes AFTER it is answered.
+- On "mcq": [{ "option": "No", "goto": "<exact label of a LATER field>" }] — per-option routing. "goto" is the exact label of a field that appears LATER in the array, or the string "end" to finish the form early. Options without a branch just continue to the next field.
+- On any other type: exactly one rule with "option": "*" — e.g. [{ "option": "*", "goto": "end" }] means "after this question, end". Use this on the LAST question of a side-branch so it doesn't spill into the other branch's questions.
+- LAYOUT PATTERN (follow exactly): put the DEFAULT/main path's questions immediately after the branching mcq (they need NO rule — unrouted options fall through to the next field), and the side-branch questions AFTER the main path's. Give the side branch's last question {"option": "*", "goto": "end"} only if it isn't the final field. Double-check every option lands on a question that makes sense for that answer.
+- Most forms need NO branches at all. Never invent conditions the prompt doesn't imply.
+
+OUTPUT — strictly valid JSON only, no markdown fences. Example (an RSVP where "No" skips to a why-not question; "Yes" falls through to the main path):
 {
-  "title": "Form Title",
+  "title": "Launch Party RSVP",
   "description": "Short description",
-  "welcome_message": "Hi! Thank you so much for your interest in our beta. We'll ask a few quick questions to get to know you better.",
+  "welcome_message": "Hi! Thank you so much for your interest in our launch party. We'll ask a few quick questions to get to know you better.",
   "fields": [
     { "label": "Full Name", "field_type": "text", "required": true },
-    { "label": "Are you currently employed?", "field_type": "mcq", "required": true, "options": ["Yes", "No"] },
-    { "label": "Preferred Degree", "field_type": "mcq", "required": true, "options": ["BTech", "BBA", "BDes"] },
-    { "label": "Upload Resume", "field_type": "file", "required": false }
+    { "label": "Will you be attending?", "field_type": "mcq", "required": true, "options": ["Yes", "No"], "branches": [{ "option": "No", "goto": "What's keeping you away?" }] },
+    { "label": "Any dietary preferences?", "field_type": "text", "required": false, "branches": [{ "option": "*", "goto": "end" }] },
+    { "label": "What's keeping you away?", "field_type": "textarea", "required": false }
   ]
 }`
 
@@ -112,6 +119,41 @@ OUTPUT — strictly valid JSON only, no markdown fences:
       .replace(/\s*```$/i, '')
       .trim()
     const schema = JSON.parse(cleaned)
+
+    // Convert AI "branches" (label-based — LLMs are terrible at index math)
+    // into editor logic_rules (clientKey-based), sanitizing hard: forward-only
+    // targets, known options, "*" only on non-mcq. Anything invalid is
+    // silently dropped — a flat form is always a safe fallback.
+    const rawFields: any[] = Array.isArray(schema.fields) ? schema.fields : []
+    const clientKeys = rawFields.map(() => crypto.randomUUID())
+    const targetIndex = (goto: unknown, from: number): number | null => {
+      if (typeof goto !== 'string') return null
+      const label = goto.trim().toLowerCase()
+      const idx = rawFields.findIndex((f, k) => k > from && typeof f?.label === 'string' && f.label.trim().toLowerCase() === label)
+      return idx > from ? idx : null
+    }
+    schema.fields = rawFields.map((f: any, i: number) => {
+      const { branches, ...rest } = f ?? {}
+      const options: string[] = Array.isArray(rest.options) ? rest.options : []
+      const isMcq = rest.field_type === 'mcq'
+      const rules = (Array.isArray(branches) ? branches : [])
+        .filter((b: any) => b && typeof b.option === 'string')
+        .filter((b: any) => b.option === '*'
+          ? true
+          : isMcq && options.some(o => typeof o === 'string' && o.trim().toLowerCase() === b.option.trim().toLowerCase()))
+        .map((b: any) => {
+          const goto = b.goto ?? b.goto_index
+          if (goto === 'end') return { option: b.option, goto: 'end' }
+          const idx = targetIndex(goto, i)
+          return { option: b.option, goto: idx !== null ? clientKeys[idx] : null }
+        })
+        .filter((r: any) => r.goto !== null)
+      return {
+        ...rest,
+        clientKey: clientKeys[i],
+        ...(rules.length > 0 ? { logic_rules: rules } : {}),
+      }
+    })
 
     return NextResponse.json({ schema })
   } catch (err: any) {

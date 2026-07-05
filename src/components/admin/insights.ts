@@ -27,6 +27,7 @@ export type SessionAnalytics = {
   avgDurationMs: number | null   // over completed sessions
   medianDurationMs: number | null
   funnel: FunnelStep[]           // how many sessions reached each field index
+  branched?: boolean             // form has routing rules — some skips are intentional
   devices: NameCount[]           // device_type breakdown
   browsers: NameCount[]          // browser breakdown
 }
