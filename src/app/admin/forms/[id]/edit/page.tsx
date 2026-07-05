@@ -19,7 +19,7 @@ export default async function EditFormPage({ params }: { params: Promise<{ id: s
 
   const { data: fields } = await supabase
     .from('fields')
-    .select('id, label, field_type, required, order_index, options')
+    .select('id, label, field_type, required, order_index, options, logic_rules')
     .eq('form_id', id)
     .order('order_index')
 
@@ -46,6 +46,9 @@ export default async function EditFormPage({ params }: { params: Promise<{ id: s
       field_type: f.field_type,
       required: !!f.required,
       options: Array.isArray(f.options) ? f.options : [],
+      // Stored rule targets are uuids; existing fields' clientKey IS their id,
+      // so the editor can use them as-is.
+      logic_rules: Array.isArray(f.logic_rules) ? f.logic_rules : undefined,
     })),
   }
 

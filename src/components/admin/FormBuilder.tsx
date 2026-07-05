@@ -1,9 +1,21 @@
 'use client'
 
 import { useState } from 'react'
-import { Plus, Trash2, CheckCircle2, Loader2, ArrowUp, ArrowDown, AlertTriangle, MessageCircle } from 'lucide-react'
+import { Plus, Trash2, CheckCircle2, Loader2, ArrowUp, ArrowDown, AlertTriangle, MessageCircle, GitBranch } from 'lucide-react'
+import { validateLogicRules, ANY_OPTION } from '@/lib/branching'
 
-export type BuilderField = { id?: string; label: string; field_type: string; required: boolean; options?: string[] }
+// Branch targets reference clientKeys while editing (stable across reorders
+// and for brand-new fields); the server maps them to real uuids on save.
+export type BuilderRule = { option: string; goto: string | 'end' | null }
+export type BuilderField = {
+  id?: string
+  clientKey?: string
+  label: string
+  field_type: string
+  required: boolean
+  options?: string[]
+  logic_rules?: BuilderRule[]
+}
 export type BuilderSchema = {
   title: string
   description: string
@@ -41,11 +53,48 @@ const FIELD_TYPES: { value: string; label: string }[] = [
 ]
 
 export default function FormBuilder({ initialSchema, onSave, saveLabel, savingLabel = 'Saving...', responseCounts }: Props) {
-  const [schema, setSchema] = useState<BuilderSchema>(initialSchema)
+  const [schema, setSchema] = useState<BuilderSchema>(() => ({
+    ...initialSchema,
+    // Every field needs a stable identity for branch targets before it has a DB id
+    fields: initialSchema.fields.map(f => ({ ...f, clientKey: f.clientKey ?? f.id ?? crypto.randomUUID() })),
+  }))
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
 
   const countFor = (f: BuilderField) => (f.id && responseCounts ? responseCounts[f.id] ?? 0 : 0)
+  const keyOf = (f: BuilderField) => f.clientKey as string
+
+  // Live validation reusing the same rules module the runtime uses (clientKey
+  // stands in for the field id here).
+  const ruleErrors = validateLogicRules(schema.fields.map((f, i) => ({
+    id: keyOf(f),
+    label: f.label || `Question ${i + 1}`,
+    field_type: f.field_type,
+    options: f.options,
+    logic_rules: f.logic_rules,
+  }) as any))
+
+  /** Current target for an option ('' = default next question). */
+  function ruleTarget(field: BuilderField, option: string): string {
+    const rule = (field.logic_rules ?? []).find(r => r.option === option)
+    return rule?.goto ?? ''
+  }
+
+  function setRule(idx: number, option: string, goto: string) {
+    const field = schema.fields[idx]
+    const rules = (field.logic_rules ?? []).filter(r => r.option !== option)
+    if (goto !== '') rules.push({ option, goto: goto as BuilderRule['goto'] })
+    updateField(idx, { logic_rules: rules.length > 0 ? rules : undefined })
+  }
+
+  /** Strip every rule (in any field) pointing at the removed field's key. */
+  function stripRulesTargeting(fields: BuilderField[], removedKey: string): BuilderField[] {
+    return fields.map(f => {
+      if (!f.logic_rules?.some(r => r.goto === removedKey)) return f
+      const kept = f.logic_rules.filter(r => r.goto !== removedKey)
+      return { ...f, logic_rules: kept.length > 0 ? kept : undefined }
+    })
+  }
 
   function updateField(idx: number, updates: Partial<BuilderField>) {
     const newFields = [...schema.fields]
@@ -62,21 +111,32 @@ export default function FormBuilder({ initialSchema, onSave, saveLabel, savingLa
     updateField(idx, {
       field_type: newType,
       options: newType === 'mcq' ? (field.options?.length ? field.options : ['Option A', 'Option B']) : [],
+      // Per-option routes only make sense on mcq; the "after this" rule survives
+      logic_rules: field.logic_rules?.filter(r => newType === 'mcq' || r.option === ANY_OPTION),
     })
   }
 
   function addField() {
-    setSchema({ ...schema, fields: [...schema.fields, { label: 'New Field', field_type: 'text', required: false, options: [] }] })
+    setSchema({
+      ...schema,
+      fields: [...schema.fields, { clientKey: crypto.randomUUID(), label: 'New Field', field_type: 'text', required: false, options: [] }],
+    })
   }
 
   function removeField(idx: number) {
     const field = schema.fields[idx]
     const count = countFor(field)
-    if (count > 0) {
-      if (!window.confirm(`"${field.label}" has ${count} response${count !== 1 ? 's' : ''}. Removing this field permanently deletes that collected data. Continue?`)) return
+    const referencedBy = schema.fields.filter(f => f !== field && f.logic_rules?.some(r => r.goto === keyOf(field)))
+    const warnings = [
+      count > 0 ? `"${field.label}" has ${count} response${count !== 1 ? 's' : ''}. Removing this field permanently deletes that collected data.` : '',
+      referencedBy.length > 0 ? `${count > 0 ? 'It' : `"${field.label}"`} is a branch target of "${referencedBy[0].label}" — that branch will revert to "next question".` : '',
+    ].filter(Boolean)
+    if (warnings.length > 0) {
+      if (!window.confirm(`${warnings.join(' ')} Continue?`)) return
     }
-    const newFields = [...schema.fields]
+    let newFields = [...schema.fields]
     newFields.splice(idx, 1)
+    newFields = stripRulesTargeting(newFields, keyOf(field))
     setSchema({ ...schema, fields: newFields })
   }
 
@@ -92,6 +152,7 @@ export default function FormBuilder({ initialSchema, onSave, saveLabel, savingLa
     if (!schema.title.trim()) { setError('Give your form a title.'); return }
     if (schema.fields.length === 0) { setError('Add at least one field.'); return }
     if (schema.fields.some(f => !f.label.trim())) { setError('Every field needs a label.'); return }
+    if (ruleErrors.length > 0) { setError(`Fix the branching first: ${ruleErrors[0]}`); return }
     setSaving(true); setError('')
     const res = await onSave(schema)
     if (res && 'error' in res && res.error) {
@@ -176,13 +237,21 @@ export default function FormBuilder({ initialSchema, onSave, saveLabel, savingLa
                           onChange={e => {
                             const newOpts = [...(field.options || [])]
                             newOpts[oi] = e.target.value
-                            updateField(i, { options: newOpts })
+                            // Keep any branch rule attached to the renamed option
+                            const rules = field.logic_rules?.map(r => r.option === opt ? { ...r, option: e.target.value } : r)
+                            updateField(i, { options: newOpts, logic_rules: rules })
                           }}
                           className="bg-transparent focus:outline-none w-20"
                         />
                         <button
                           type="button"
-                          onClick={() => updateField(i, { options: (field.options || []).filter((_, idx) => idx !== oi) })}
+                          onClick={() => {
+                            const rules = field.logic_rules?.filter(r => r.option !== opt)
+                            updateField(i, {
+                              options: (field.options || []).filter((_, idx) => idx !== oi),
+                              logic_rules: rules && rules.length > 0 ? rules : undefined,
+                            })
+                          }}
                           className="text-foreground/40 hover:text-red-400 transition-colors"
                         >{'×'}</button>
                       </span>
@@ -194,6 +263,81 @@ export default function FormBuilder({ initialSchema, onSave, saveLabel, savingLa
                     >+ Add option</button>
                   </div>
                 )}
+
+                {/* Branching — where each answer leads */}
+                {(() => {
+                  const laterFields = schema.fields
+                    .map((f2, i2) => ({ f: f2, idx: i2 }))
+                    .filter(({ idx }) => idx > i)
+                  const isLast = laterFields.length === 0
+                  const targetSelect = (option: string) => (
+                    <select
+                      value={ruleTarget(field, option)}
+                      onChange={e => setRule(i, option, e.target.value)}
+                      className="bg-foreground/[0.03] border border-foreground/10 rounded-lg text-xs px-2 py-1 max-w-[220px] focus:ring-0"
+                    >
+                      <option value="">Next question</option>
+                      <option value="end">End the form</option>
+                      {laterFields.map(({ f: f2, idx }) => (
+                        <option key={keyOf(f2)} value={keyOf(f2)}>
+                          {idx + 1}. {(f2.label || 'Untitled').slice(0, 40)}
+                        </option>
+                      ))}
+                    </select>
+                  )
+
+                  if (field.field_type === 'mcq' && (field.options?.length ?? 0) > 0 && !isLast) {
+                    return (
+                      <div className="ml-8 space-y-1.5 pb-1 pt-0.5">
+                        <p className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-foreground/35">
+                          <GitBranch className="h-3 w-3" /> Branching
+                        </p>
+                        {(field.options || []).map((opt, oi) => (
+                          <div key={oi} className="flex items-center gap-2 text-xs text-foreground/55">
+                            <span className="w-28 truncate shrink-0">If &ldquo;{opt || '…'}&rdquo;</span>
+                            <span aria-hidden className="text-foreground/25">→</span>
+                            {targetSelect(opt)}
+                          </div>
+                        ))}
+                      </div>
+                    )
+                  }
+                  // Any other field type can still route once answered — this is
+                  // what lets a branch end on a free-text question instead of
+                  // leaking into the questions below it.
+                  if (!isLast && field.field_type !== 'mcq') {
+                    const hasRule = ruleTarget(field, ANY_OPTION) !== ''
+                    if (!hasRule) {
+                      return (
+                        <div className="ml-8 pb-1">
+                          <button
+                            type="button"
+                            onClick={() => setRule(i, ANY_OPTION, 'end')}
+                            className="flex items-center gap-1.5 text-[11px] text-foreground/30 hover:text-accent-amber transition-colors"
+                          >
+                            <GitBranch className="h-3 w-3" /> Add branching
+                          </button>
+                        </div>
+                      )
+                    }
+                    return (
+                      <div className="ml-8 flex items-center gap-2 pb-1 text-xs text-foreground/55">
+                        <span className="flex items-center gap-1.5 shrink-0">
+                          <GitBranch className="h-3 w-3 text-foreground/35" /> After this question
+                        </span>
+                        <span aria-hidden className="text-foreground/25">→</span>
+                        {targetSelect(ANY_OPTION)}
+                        <button
+                          type="button"
+                          onClick={() => setRule(i, ANY_OPTION, '')}
+                          className="text-foreground/30 hover:text-red-400 transition-colors"
+                          title="Remove branching"
+                        >{'×'}</button>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
               </div>
             )
           })}
@@ -296,6 +440,16 @@ export default function FormBuilder({ initialSchema, onSave, saveLabel, savingLa
           </div>
         </div>
       </div>
+
+      {ruleErrors.length > 0 && (
+        <div className="space-y-1 rounded-xl border border-accent-amber/20 bg-accent-amber/[0.06] px-4 py-3">
+          {ruleErrors.map((e, k) => (
+            <p key={k} className="flex items-center gap-2 text-xs text-accent-amber">
+              <GitBranch className="h-3 w-3 shrink-0" /> {e}
+            </p>
+          ))}
+        </div>
+      )}
 
       {error && (
         <div className="flex items-center justify-center gap-2 text-red-500 text-sm">

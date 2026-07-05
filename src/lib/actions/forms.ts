@@ -1,13 +1,52 @@
 'use server'
 
 import { createClient } from '@/lib/supabase/server'
+import { validateLogicRules, ANY_OPTION, type LogicRule, type BranchField } from '@/lib/branching'
 
 interface FieldInput {
   id?: string          // present when editing an existing field
+  clientKey?: string   // editor-stable identity; branch rule targets reference this
   label: string
   field_type: string
   required: boolean
   options?: string[]
+  logic_rules?: LogicRule[]  // goto = clientKey | 'end' | null while editing
+}
+
+// Map editor rules (clientKey targets) to DB rules (uuid targets), dropping
+// anything unresolvable, then enforce the structural invariants. Backward or
+// self targets are the author's mistake — reject loudly instead of guessing.
+function resolveLogicRules(
+  fields: FieldInput[],
+  keyToDbId: Map<string, string>,
+): { rulesByKey: Map<string, LogicRule[] | null>; error?: string } {
+  const rulesByKey = new Map<string, LogicRule[] | null>()
+  const resolved: BranchField[] = fields.map((f, i) => {
+    const options = (f.options ?? []).map(o => o.trim().toLowerCase())
+    const rules = (Array.isArray(f.logic_rules) ? f.logic_rules : [])
+      .filter(r => r && typeof r.option === 'string' && r.goto !== null && r.goto !== undefined)
+      // unknown option → silently drop (stale editor state)
+      .filter(r => r.option === ANY_OPTION || options.includes(r.option.trim().toLowerCase()))
+      .map(r => ({
+        option: r.option,
+        goto: r.goto === 'end' ? ('end' as const) : (keyToDbId.get(r.goto as string) ?? r.goto),
+      }))
+      // dangling target (deleted field) → silently drop
+      .filter(r => r.goto === 'end' || fields.some(f2 => keyToDbId.get(f2.clientKey ?? f2.id ?? '') === r.goto))
+    const key = f.clientKey ?? f.id ?? String(i)
+    rulesByKey.set(key, rules.length > 0 ? rules : null)
+    return {
+      id: keyToDbId.get(key) ?? key,
+      label: f.label,
+      field_type: f.field_type,
+      options: f.options,
+      logic_rules: rules,
+    } as BranchField
+  })
+
+  const errors = validateLogicRules(resolved)
+  if (errors.length > 0) return { rulesByKey, error: errors[0] }
+  return { rulesByKey }
 }
 
 // Per-form AI personality settings (see migration 0002)
@@ -53,12 +92,37 @@ export async function saveForm(title: string, description: string, fields: Field
     options: f.options && f.options.length > 0 ? f.options : null,
   }))
 
-  const { error: fieldsErr } = await supabase.from('fields').insert(fieldsToInsert)
-  
-  if (fieldsErr) {
+  // Two-pass save: rules can point at fields that don't have uuids yet, so
+  // insert first (returned rows match input order), then write the rules.
+  const { data: inserted, error: fieldsErr } = await supabase
+    .from('fields')
+    .insert(fieldsToInsert)
+    .select('id')
+
+  if (fieldsErr || !inserted || inserted.length !== fields.length) {
     // Basic rollback attempt
     await supabase.from('forms').delete().eq('id', form.id)
-    throw new Error(fieldsErr.message)
+    throw new Error(fieldsErr?.message ?? 'Failed to save fields.')
+  }
+
+  const hasRules = fields.some(f => Array.isArray(f.logic_rules) && f.logic_rules.length > 0)
+  if (hasRules) {
+    const keyToDbId = new Map<string, string>()
+    fields.forEach((f, i) => keyToDbId.set(f.clientKey ?? f.id ?? String(i), inserted[i].id))
+    const { rulesByKey, error: ruleErr } = resolveLogicRules(fields, keyToDbId)
+    if (ruleErr) {
+      await supabase.from('forms').delete().eq('id', form.id)
+      throw new Error(ruleErr)
+    }
+    for (let i = 0; i < fields.length; i++) {
+      const rules = rulesByKey.get(fields[i].clientKey ?? fields[i].id ?? String(i)) ?? null
+      if (!rules) continue
+      const { error } = await supabase.from('fields').update({ logic_rules: rules }).eq('id', inserted[i].id)
+      if (error) {
+        await supabase.from('forms').delete().eq('id', form.id)
+        throw new Error(error.message)
+      }
+    }
   }
 
   return form.id
@@ -154,9 +218,13 @@ export async function updateForm(
       if (error) throw new Error(error.message)
     }
 
-    // 2b. Update existing fields / insert new ones, rewriting order_index
+    // 2b. Update existing fields / insert new ones, rewriting order_index.
+    // Pass 1 writes everything except logic_rules while collecting the real
+    // uuid for each editor clientKey (new fields only get theirs on insert).
+    const keyToDbId = new Map<string, string>()
     for (let i = 0; i < fields.length; i++) {
       const f = fields[i]
+      const key = f.clientKey ?? f.id ?? String(i)
       const payload = {
         label: f.label,
         field_type: f.field_type,
@@ -167,10 +235,29 @@ export async function updateForm(
       if (f.id && existingIds.has(f.id)) {
         const { error } = await supabase.from('fields').update(payload).eq('id', f.id)
         if (error) throw new Error(error.message)
+        keyToDbId.set(key, f.id)
       } else {
-        const { error } = await supabase.from('fields').insert({ form_id: formId, ...payload })
+        const { data: created, error } = await supabase
+          .from('fields')
+          .insert({ form_id: formId, ...payload })
+          .select('id')
+          .single()
         if (error) throw new Error(error.message)
+        keyToDbId.set(key, created.id)
       }
+    }
+
+    // Pass 2: rule targets resolve clientKey → uuid, then persist per field
+    // (including clearing rules that were removed in the editor).
+    const { rulesByKey, error: ruleErr } = resolveLogicRules(fields, keyToDbId)
+    if (ruleErr) throw new Error(ruleErr)
+    for (let i = 0; i < fields.length; i++) {
+      const key = fields[i].clientKey ?? fields[i].id ?? String(i)
+      const { error } = await supabase
+        .from('fields')
+        .update({ logic_rules: rulesByKey.get(key) ?? null })
+        .eq('id', keyToDbId.get(key)!)
+      if (error) throw new Error(error.message)
     }
 
     revalidatePath(`/admin/forms/${formId}`)
