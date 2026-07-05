@@ -16,6 +16,7 @@ import { ConfirmationPill } from '@/components/form/ConfirmationPill'
 import { parseDevice } from '@/lib/device'
 import { startFormSession, updateSessionProgress } from '@/lib/actions/sessions'
 import { mapErrorToUi, type ApiErrorCode } from '@/lib/api-errors'
+import { computePath, projectedTotal, onPathFieldIds, type BranchField } from '@/lib/branching'
 
 const GHOST_MESSAGES = [
   'Taking a moment, bear with me.',
@@ -290,6 +291,7 @@ export default function FormSession({
     onSuccess: (aiMessage: string, isComplete: boolean) => void,
     extraContext?: string,
     confidence?: number,
+    tappedOption?: string,
   ) => {
     store.setIsAiTyping(true)
     store.setConnectionLost(false)
@@ -312,6 +314,9 @@ export default function FormSession({
         userMessage,
         userEmail,
         currentLanguage: languageRef.current,
+        // Answers so far let the server walk the branch tree deterministically
+        answers: useConversationStore.getState().answers,
+        ...(tappedOption ? { tappedOption } : {}),
         ...(extraContext ? { extraContext } : {}),
         confidence,
       },
@@ -588,7 +593,10 @@ export default function FormSession({
       } catch { }
     }
 
-    const startFieldIndex = Math.max(0, fields.findIndex(f => !store.answers[f.id]))
+    // Resume at the branch-aware frontier — first unanswered field ON THE PATH
+    // (a plain first-unanswered scan would land on skipped branch questions).
+    const frontier = computePath(fields as BranchField[], store.answers).frontier
+    const startFieldIndex = Math.min(frontier, fields.length - 1)
 
     await handleConverseResponse('Hello', startFieldIndex, 'voice', (aiMessage) => {
       playSmartAudio(aiMessage, () => {
@@ -639,15 +647,22 @@ export default function FormSession({
       const inputMethod = store.history.some(h => h.role === 'user' && h.text.includes('[Voice]'))
         ? 'voice' : 'text'
 
+      // Branched forms: only answers on the taken path are submitted — answers
+      // orphaned by a corrected branch choice stay behind (server re-filters too).
+      const onPath = onPathFieldIds(fields as BranchField[], store.answers)
+      const pathAnswers = Object.fromEntries(Object.entries(store.answers).filter(([id]) => onPath.has(id)))
+      const pathSentiments = Object.fromEntries(Object.entries(store.sentiments).filter(([id]) => onPath.has(id)))
+
       const formData = new FormData()
       formData.append('formId', form.id)
       formData.append('inputMethod', inputMethod)
       formData.append('sessionId', sessionIdRef.current ?? '')
-      formData.append('answers', JSON.stringify(store.answers))
-      formData.append('sentiments', JSON.stringify(store.sentiments))
+      formData.append('answers', JSON.stringify(pathAnswers))
+      formData.append('sentiments', JSON.stringify(pathSentiments))
       formData.append('history', JSON.stringify(store.history))
 
       Object.entries(store.audioBlobs).forEach(([fieldId, audioBlob]) => {
+        if (!onPath.has(fieldId)) return
         formData.append(`audio_${fieldId}`, audioBlob as Blob, `${fieldId}.webm`)
       })
 
@@ -716,8 +731,12 @@ export default function FormSession({
   if (store.mode === 'voice' || store.mode === 'choice') {
     const lastAiText = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text ?? ''
     const isThinking = voiceState === 'thinking' || voiceState === 'transcribing'
-    const totalFields = fields.length
-    const currentQuestionNum = Math.min(store.currentFieldIndex + 1, totalFields)
+    // Path-aware progress: on branched forms the position/total follow the
+    // taken path (identical to index math on linear forms).
+    const path = computePath(fields as BranchField[], store.answers)
+    const totalFields = projectedTotal(fields as BranchField[], store.answers)
+    const posInPath = path.visited.indexOf(store.currentFieldIndex)
+    const currentQuestionNum = Math.min(posInPath >= 0 ? posInPath + 1 : path.visited.length, totalFields)
 
     const orbColour = !started
       ? 'bg-accent-amber/15 border border-accent-amber/30 shadow-[0_0_60px_rgba(234,140,20,0.2)]'
@@ -1054,7 +1073,7 @@ export default function FormSession({
                         store.setMode('review')
                       }
                     })
-                  })
+                  }, undefined, undefined, opt)
                 }}
                 className="px-6 py-3 rounded-full bg-foreground/[0.04] hover:bg-foreground/[0.08] active:scale-95 border border-foreground/10 text-foreground font-medium transition-all text-sm"
               >
@@ -1189,12 +1208,15 @@ export default function FormSession({
   }
 
   if (store.mode === 'review') {
+    // Only the questions on the taken path get reviewed — off-path fields are
+    // never enforced as required and their orphaned answers stay hidden.
+    const reviewPath = onPathFieldIds(fields as BranchField[], store.answers)
     return (
       <>
         {previewBanner}
         <ReviewScreen
           form={form}
-          fields={fields}
+          fields={fields.filter(f => reviewPath.has(f.id))}
           answers={store.answers}
           onAnswerChange={(id, v) => store.setAnswer(id, v)}
           onSubmit={handleSubmitForm}
@@ -1206,12 +1228,13 @@ export default function FormSession({
   }
 
   if (store.mode === 'success') {
+    const successPath = onPathFieldIds(fields as BranchField[], store.answers)
     return (
       <>
         {previewBanner}
         <SuccessScreen
           form={form}
-          fields={fields}
+          fields={fields.filter(f => successPath.has(f.id))}
           answers={store.answers}
           submissionId={submissionId}
           submissionTime={submissionTime}

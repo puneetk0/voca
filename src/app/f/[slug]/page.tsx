@@ -24,14 +24,17 @@ function FormNotice({ title, message }: { title: string; message: string }) {
 // generateMetadata and the page component both need the form, but only one DB query fires.
 const getForm = cache(async (slug: string) => {
   const supabase = await createClient()
+  // NOTE: comparing a non-UUID string against the uuid `id` column makes
+  // Postgres error out (invalid input syntax), which nulls the whole result —
+  // so only fall back to an id lookup when the slug actually looks like one.
   const { data: form } = await supabase
     .from('forms')
     .select('*')
-    .or(`slug.eq.${slug},id.eq.${slug}`)
+    .eq('slug', slug)
     .single()
+  if (form) return form
 
-  if (!form) {
-    // Fallback: try by ID (handles legacy UUIDs used as slugs)
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(slug)) {
     const { data: formById } = await supabase
       .from('forms')
       .select('*')
@@ -39,7 +42,7 @@ const getForm = cache(async (slug: string) => {
       .single()
     return formById ?? null
   }
-  return form
+  return null
 })
 
 export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
