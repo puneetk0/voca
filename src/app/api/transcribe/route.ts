@@ -97,13 +97,20 @@ export async function POST(req: Request) {
       : clientMimeType.includes('ogg') ? 'ogg'
         : 'webm'
 
+    // Providers validate the multipart part's Content-Type by EXACT base MIME.
+    // MediaRecorder tags blobs as "audio/webm; codecs=opus" — the codecs suffix
+    // makes Sarvam reject an otherwise-allowed "audio/webm". Re-wrap with the
+    // bare base type so the part's Content-Type is clean.
+    const baseType = (clientMimeType || (file as any).type || 'audio/webm').split(';')[0].trim() || 'audio/webm'
+    const cleanFile = new Blob([file], { type: baseType })
+
     // --- SARVAM SAARIKA PATH (PRIMARY) ---
     // Purpose-built for Indian accents, names and code-mixed speech — Whisper
     // consistently mangles Indian proper nouns ("Puneet" → "bony").
     if (hasSarvam) {
       try {
         const sarvamData = new FormData()
-        sarvamData.append('file', file, `audio.${ext}`)
+        sarvamData.append('file', cleanFile, `audio.${ext}`)
         sarvamData.append('model', 'saarika:v2.5')
         sarvamData.append('language_code', 'unknown') // auto-detect (handles Hinglish)
 
@@ -130,7 +137,7 @@ export async function POST(req: Request) {
     // --- GROQ WHISPER PATH (FALLBACK) ---
     if (hasGroq) {
       const groqData = new FormData()
-      groqData.append('file', file, `audio.${ext}`)
+      groqData.append('file', cleanFile, `audio.${ext}`)
       groqData.append('model', 'whisper-large-v3-turbo')
       groqData.append('response_format', 'verbose_json')
       groqData.append('language', 'en')
