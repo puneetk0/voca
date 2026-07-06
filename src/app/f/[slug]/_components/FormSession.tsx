@@ -484,7 +484,7 @@ export default function FormSession({
   }, [form.id, store, fields, userEmail, killAudio])
 
   // --- VOICE TRANSCRIPT HANDLER ---
-  const { startRecording, stopRecording, isRecording, isProcessing, error: recorderError, stream, vadVolume } = useVoiceRecorder(
+  const { startRecording, stopRecording, primeMic, isRecording, isProcessing, error: recorderError, stream, vadVolume } = useVoiceRecorder(
     async (transcript, audioBlob, confidence) => {
       // Guard 1: AI is still speaking — ignore, VAD fired too early
       if (isSpeakingRef.current) return
@@ -623,8 +623,9 @@ export default function FormSession({
 
   async function handleInitialSequence() {
     try {
-      const tempStream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      tempStream.getTracks().forEach(t => t.stop())
+      // Prime the ONE persistent mic stream at session start — a single
+      // permission prompt, reused for every question (no per-question prompt).
+      await primeMic()
     } catch (e: any) {
       const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent)
       if (e?.name === 'NotAllowedError') {

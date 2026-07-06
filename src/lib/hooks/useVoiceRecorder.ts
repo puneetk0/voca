@@ -31,6 +31,9 @@ export function useVoiceRecorder(
 
   const mediaRecorder = useRef<MediaRecorder | null>(null)
   const audioChunks = useRef<BlobPart[]>([])
+  // ONE persistent mic stream for the whole session. Re-acquiring getUserMedia
+  // per question made mobile browsers re-prompt for permission every single
+  // question and added visible latency — now we grab it once and reuse it.
   const micStreamRef = useRef<MediaStream | null>(null)
   const shouldIgnoreNextStopRef = useRef(false)
   // Reentrancy guard: two overlapping startRecording calls (rapid orb taps)
@@ -84,6 +87,31 @@ export function useVoiceRecorder(
     }
   }, [clearVAD])
 
+  // Acquire the mic once, then reuse the SAME live stream for every question.
+  // getUserMedia only prompts on the first call; after that the cached stream
+  // is returned instantly (no prompt, no latency).
+  const ensureStream = useCallback(async (): Promise<MediaStream> => {
+    const existing = micStreamRef.current
+    if (existing && existing.getAudioTracks().some(t => t.readyState === 'live')) {
+      return existing
+    }
+    const micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        // Don't force 16kHz here — let the browser pick its native rate.
+        // Forcing 16kHz on some iOS/Android devices causes getUserMedia to reject
+        // the constraint entirely rather than falling back gracefully.
+      },
+    })
+    micStreamRef.current = micStream
+    return micStream
+  }, [])
+
+  // Prime the mic ahead of the first question (single prompt at session start).
+  // Throws on denial so the caller can show a helpful message.
+  const primeMic = useCallback(async () => { await ensureStream() }, [ensureStream])
+
   const startRecording = useCallback(async () => {
     // Reentrancy guard — a second call while one recorder is starting or live
     // must be a no-op, not a parallel recorder.
@@ -91,25 +119,8 @@ export function useVoiceRecorder(
     if (mediaRecorder.current && mediaRecorder.current.state === 'recording') return
     isStartingRef.current = true
 
-    // Clean up any lingering stream from a previous session
-    if (micStreamRef.current) {
-      micStreamRef.current.getTracks().forEach(t => t.stop())
-      micStreamRef.current = null
-    }
-
     try {
-      const micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          // Don't force 16kHz here — let the browser pick its native rate.
-          // Forcing 16kHz on some iOS/Android devices causes getUserMedia to reject
-          // the constraint entirely rather than falling back gracefully.
-          // Google STT and Groq Whisper both handle any sample rate fine.
-        },
-      })
-
-      micStreamRef.current = micStream
+      const micStream = await ensureStream()
 
       // MIME type detection — critical for iOS Safari which only supports audio/mp4
       // Test in order of quality preference
@@ -143,10 +154,7 @@ export function useVoiceRecorder(
 
         if (wasIgnored) {
           setIsProcessing(false)
-          if (micStreamRef.current) {
-            micStreamRef.current.getTracks().forEach(track => track.stop())
-            micStreamRef.current = null
-          }
+          // Keep the persistent stream alive — it's reused for the next question.
           return
         }
 
@@ -184,8 +192,8 @@ export function useVoiceRecorder(
           onTranscriptionRef.current('', new Blob(), 0)
         } finally {
           setIsProcessing(false)
-          micStream.getTracks().forEach(track => track.stop())
-          micStreamRef.current = null
+          // Persistent stream stays open for the next question — released only
+          // on unmount. This is what stops the per-question permission prompt.
         }
       }
 
@@ -311,7 +319,7 @@ export function useVoiceRecorder(
     } finally {
       isStartingRef.current = false
     }
-  }, [formId, clearVAD, stopRecording])
+  }, [formId, clearVAD, ensureStream])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -323,5 +331,5 @@ export function useVoiceRecorder(
     }
   }, [clearVAD])
 
-  return { startRecording, stopRecording, isRecording, isProcessing, error, stream, vadVolume }
+  return { startRecording, stopRecording, primeMic, isRecording, isProcessing, error, stream, vadVolume }
 }

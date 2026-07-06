@@ -15,6 +15,11 @@ const CHUNK_ERR = /Loading chunk [\w-]+ failed|ChunkLoadError|Failed to fetch dy
 export default function ChunkReloadGuard() {
   useEffect(() => {
     function recover() {
+      // NEVER auto-reload a respondent who is mid-form: on a flaky mobile
+      // connection a single failed chunk would otherwise reload the page and
+      // wipe the live conversation. The form fill page (/f/*) is a long-lived
+      // single-page experience — a stray chunk error there must not nuke it.
+      if (window.location.pathname.startsWith('/f/')) return
       // Only reload once per ~30s to avoid loops on a genuinely broken asset.
       const last = Number(sessionStorage.getItem(RELOAD_KEY) || 0)
       if (Date.now() - last < 30_000) return
