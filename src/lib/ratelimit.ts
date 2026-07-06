@@ -58,26 +58,44 @@ export async function checkLimit(
 }
 
 /**
- * Same-origin gate for the public AI routes. Browsers always attach an Origin
- * header to cross-origin POSTs — reject mismatches when we know our own URL.
- * Requests without an Origin (curl and friends) pass through to the rate
- * limiter instead.
+ * Anti-abuse origin gate for the public AI routes. Its only job is to stop
+ * OTHER websites calling our API from a user's browser — so the robust check
+ * is "did this request come from a page served on our own host?", NOT "does it
+ * exactly equal one hard-coded URL". The old exact-match-vs-NEXT_PUBLIC_APP_URL
+ * check broke the whole voice pipeline on any www/apex or *.vercel.app mismatch.
+ *
+ * Allowed: no Origin (curl → falls to the rate limiter) · same-origin as the
+ * request's own host · localhost/127.0.0.1 (any port) · *.vercel.app previews ·
+ * the configured NEXT_PUBLIC_APP_URL and its www/apex sibling.
  */
 export function isAllowedOrigin(req: Request): boolean {
   const origin = req.headers.get('origin')
   if (!origin) return true
+
+  let got: string
+  try { got = new URL(origin).host } catch { return true }
+
+  // Same-origin: Origin's host matches the host this request actually arrived on.
+  const selfHost = req.headers.get('x-forwarded-host') || req.headers.get('host')
+  if (selfHost && got === selfHost) return true
+
+  // Local + LAN dev
+  if (/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(got)) return true
+
+  // Vercel preview / deployment URLs
+  if (got === 'vercel.app' || got.endsWith('.vercel.app')) return true
+
+  // Configured canonical URL, tolerating the www/apex variant
   const appUrl = process.env.NEXT_PUBLIC_APP_URL
   if (!appUrl) return true
   try {
-    const allowed = new URL(appUrl).origin
-    const got = new URL(origin).origin
-    if (got === allowed) return true
-    // Local development conveniences
-    if (got.startsWith('http://localhost:') || got.startsWith('http://127.0.0.1:')) return true
-    return false
+    const allowed = new URL(appUrl).host
+    const bare = allowed.replace(/^www\./, '')
+    if (got === allowed || got === bare || got === 'www.' + bare) return true
   } catch {
     return true
   }
+  return false
 }
 
 /** Client IP from proxy headers (Vercel sets x-forwarded-for). */
