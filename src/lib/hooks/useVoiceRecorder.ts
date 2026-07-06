@@ -1,19 +1,21 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 
-// --- VAD Constants ---
+// --- Mic level metering ---
+// The mic stays open until the user taps the orb to stop — there is NO
+// automatic silence cutoff. The analyser loop below is kept purely to drive
+// the live waveform (vadVolume), not to end the turn.
 const SILENCE_THRESHOLD = 10       // absolute minimum noise floor
-const MAX_SILENCE_MS = 1600        // pause length that ends the answer (snappy turn-taking)
 const VAD_INTERVAL_MS = 80
 const NOISE_CALIBRATION_MS = 600
 const FLOOR_MULTIPLIER = 1.4       // applied to the ambient MEDIAN (not max — max over-calibrates)
 const FLOOR_MAX = 24               // never let a noisy calibration eat quiet speech
-const MIN_SPEECH_BEFORE_CUTOFF_MS = 700
-// Relative silence: once the user has spoken, "silence" is anything quieter
-// than a fraction of THEIR observed speech peak — robust across mic gains.
+// Waveform gate: below a fraction of the user's own speech peak reads as "quiet"
+// (shows a flat waveform). Metering only — it no longer ends the turn.
 const PEAK_SILENCE_RATIO = 0.25
-// Failsafes — the mic must NEVER record forever:
-const NO_SPEECH_TIMEOUT_MS = 8000  // nothing heard → stop, let the empty-capture reprompt run
-const MAX_RECORDING_MS = 45000     // hard cap → stop and transcribe what we have
+// Single failsafe so a walked-away mic can't record (and upload) forever.
+// Generous on purpose — real answers finish well within this; only a truly
+// abandoned session hits it.
+const MAX_RECORDING_MS = 180000    // 3 min hard cap → stop and transcribe what we have
 
 export function useVoiceRecorder(
   onTranscription: (text: string, audioBlob: Blob, confidence: number) => void,
@@ -209,16 +211,10 @@ export function useVoiceRecorder(
 
           elapsedMsRef.current += VAD_INTERVAL_MS
 
-          // FAILSAFE 1: never record forever — hard cap, transcribe what we have.
+          // Only failsafe: never record forever — hard cap, transcribe what we
+          // have. Otherwise the mic stays open until the user taps to stop.
           if (elapsedMsRef.current >= MAX_RECORDING_MS) {
             console.warn('[VAD] Max recording duration reached — stopping')
-            stopRecording()
-            return
-          }
-          // FAILSAFE 2: nothing heard at all — stop; the empty-transcript
-          // path replays the question and hints at the text input.
-          if (speechDurationRef.current === 0 && elapsedMsRef.current >= NO_SPEECH_TIMEOUT_MS) {
-            console.debug('[VAD] No speech detected — stopping')
             stopRecording()
             return
           }
@@ -255,29 +251,16 @@ export function useVoiceRecorder(
             return
           }
 
-          // Phase 2: Silence detection + expose normalised volume for waveform.
-          // Once the user has spoken, "silence" is relative to THEIR speech
-          // peak — robust across quiet mics and loud rooms.
+          // Phase 2: expose normalised volume for the live waveform ONLY.
+          // No silence cutoff — the turn ends when the user taps the orb.
+          // "Quiet" is relative to the user's own speech peak, robust to mic gain.
           const silenceCutoff = speechPeakRef.current > 0
             ? Math.max(noiseFloorRef.current, speechPeakRef.current * PEAK_SILENCE_RATIO)
             : noiseFloorRef.current
 
           if (currentVol < silenceCutoff) {
             setVadVolume(0)
-            // Only count silence toward cutoff once user has actually spoken for a bit.
-            // This prevents cutting off someone who pauses before starting their answer.
-            if (speechDurationRef.current >= MIN_SPEECH_BEFORE_CUTOFF_MS) {
-              silenceTimerRef.current += VAD_INTERVAL_MS
-              if (silenceTimerRef.current >= MAX_SILENCE_MS) {
-                console.debug('[VAD] Silence detected — stopping')
-                // VAD proved itself: the "tap when done" hint can stay hidden.
-                try { localStorage.setItem('voca_vad_ok', '1') } catch { }
-                stopRecording()
-              }
-            }
           } else {
-            silenceTimerRef.current = 0
-            speechDurationRef.current += VAD_INTERVAL_MS
             speechPeakRef.current = Math.max(speechPeakRef.current, currentVol)
             // Normalize: 0 at noise floor, 1 at 4× floor (typical speech peak)
             const normalised = Math.min((currentVol - noiseFloorRef.current) / (noiseFloorRef.current * 3), 1)

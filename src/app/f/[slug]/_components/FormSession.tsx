@@ -250,14 +250,12 @@ export default function FormSession({
     return () => clearTimeout(timer)
   }, [showTextHint])
 
-  // "Tap when done" hint: appears after 2s of listening, and retires forever
-  // once the VAD proves it can auto-stop (recorder sets voca_vad_ok on its
-  // first successful silence-stop).
+  // The mic never auto-stops, so this instruction must always be visible while
+  // listening. A tiny delay avoids a flash during the brief state transition.
   const [showDoneHint, setShowDoneHint] = useState(false)
   useEffect(() => {
     if (voiceState !== 'listening') { setShowDoneHint(false); return }
-    try { if (localStorage.getItem('voca_vad_ok') === '1') return } catch { }
-    const t = setTimeout(() => setShowDoneHint(true), 2000)
+    const t = setTimeout(() => setShowDoneHint(true), 250)
     return () => clearTimeout(t)
   }, [voiceState])
 
@@ -969,16 +967,20 @@ export default function FormSession({
             </div>
           )}
 
-          {/* First-time affordance until the VAD proves it auto-stops */}
+          {/* Listening indicator — the mic stays open until the orb is tapped */}
           <AnimatePresence>
             {showDoneHint && voiceState === 'listening' && (
               <motion.p
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
-                className="text-xs text-foreground/35 -mt-4"
+                className="flex items-center gap-2 text-sm font-medium text-lime-400 -mt-4"
               >
-                Tap the orb when you&apos;re done
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-lime-400/70" />
+                  <span className="relative inline-flex h-2 w-2 rounded-full bg-lime-400" />
+                </span>
+                Listening… tap the orb when you&apos;re done
               </motion.p>
             )}
           </AnimatePresence>
