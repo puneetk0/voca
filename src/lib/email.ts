@@ -5,6 +5,9 @@ const resend = process.env.RESEND_API_KEY
   : null
 
 const FROM = () => process.env.EMAIL_FROM || 'Voca <onboarding@resend.dev>'
+// A real reply-to address on the sending domain reads as a legitimate sender
+// (helps deliverability) and gives recipients somewhere to respond.
+const REPLY_TO = process.env.EMAIL_REPLY_TO || 'hello@vocaforms.tech'
 
 /**
  * Brand-styled welcome for new waitlist members. Warm cream canvas, serif
@@ -91,6 +94,7 @@ export async function sendWaitlistWelcome(toEmail: string) {
   const { data, error } = await resend.emails.send({
     from: FROM(),
     to: [toEmail],
+    replyTo: REPLY_TO,
     subject: 'Welcome to Voca — you’re on the list',
     html,
     text: [
@@ -196,7 +200,9 @@ export async function sendTeamInvite({
   const { data, error } = await resend.emails.send({
     from: FROM(),
     to: [toEmail],
-    subject: `${inviterEmail} invited you to "${formTitle}" on Voca`,
+    replyTo: REPLY_TO,
+    // No raw email address in the subject — that reads as phishing to spam filters.
+    subject: `You're invited to "${formTitle}" on Voca`,
     html,
     text: [
       `${inviterEmail} invited you to join "${formTitle}" on Voca as a ${role}.`,
@@ -248,13 +254,10 @@ export async function sendResponseNotification({
 
   const dashboardUrl = `${process.env.NEXT_PUBLIC_APP_URL ?? 'https://vocaforms.tech'}/admin/forms/${formId}`
 
-  // Custom from-addresses need a verified domain in Resend; the resend.dev
-  // default works out-of-box for testing.
-  const from = process.env.EMAIL_FROM || 'Voca <onboarding@resend.dev>'
-
   await resend.emails.send({
-    from,
+    from: FROM(),
     to: [toEmail],
+    replyTo: REPLY_TO,
     subject: `New response to "${formTitle}"`,
     text: [
       `Someone just filled out your form "${formTitle}".`,
