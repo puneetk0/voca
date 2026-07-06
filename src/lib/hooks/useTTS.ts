@@ -9,10 +9,11 @@ const FILLERS: Record<'hi' | 'en', string[]> = {
   en: ["Hmm...", "Okay...", "Right...", "Got it..."],
 }
 
-// Long openers legitimately take Sarvam 7-8s to synthesize — aborting at 5s
-// was silently dropping the most important line of the form to the robotic
-// browser voice. The watchdog still bounds total wait.
-const TTS_FETCH_TIMEOUT_MS = 12000
+// Long openers legitimately take Sarvam up to ~11s to synthesize. The server
+// makes a single 11s Sarvam attempt, so the client must wait a beat longer than
+// that or it would abort mid-synthesis and drop the opening line to the silent
+// browser voice. 13s > server's 11s ceiling, with headroom for network.
+const TTS_FETCH_TIMEOUT_MS = 13000
 
 export function useTTS(
   formId: string,

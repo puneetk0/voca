@@ -133,6 +133,12 @@ export default function FormSession({
 
   // isHandlingTranscriptRef: true while a converse call is in-flight, blocks duplicate VAD fires
   const isHandlingTranscriptRef = useRef(false)
+  // Consecutive empty voice captures. Silence/noise that transcribes to nothing
+  // triggers a reprompt + re-listen; without a cap that can spin into a request
+  // storm (a reprompt TTS call every cycle). After a few, stop auto-listening
+  // and nudge the user to type instead.
+  const emptyCaptureStreakRef = useRef(0)
+  const MAX_EMPTY_CAPTURES = 3
 
   // Turn machinery: each converse call is a numbered turn holding its own
   // AbortController. A newer turn aborts the previous one; stale resolutions
@@ -425,12 +431,22 @@ export default function FormSession({
 
       const cleanTranscript = transcript.trim()
 
-      // Empty capture — replay last question, re-listen, and hint toward text input
+      // Empty capture — replay last question, re-listen, and hint toward text input.
       if (cleanTranscript.length < 2) {
         const capturedFieldIndex = store.currentFieldIndex
+        emptyCaptureStreakRef.current++
+        setShowTextHint(true)
+        // Too many empties in a row (silence/noise, dead mic, or failing audio):
+        // stop the reprompt→re-listen loop so we don't spin requests. Go idle
+        // and let the user tap the orb or type to resume.
+        if (emptyCaptureStreakRef.current >= MAX_EMPTY_CAPTURES) {
+          emptyCaptureStreakRef.current = 0
+          setVoiceState('idle')
+          isHandlingTranscriptRef.current = false
+          return
+        }
         const lastAiMessage = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text
         const reprompt = lastAiMessage || "Sorry, didn't quite catch that — could you try again?"
-        setShowTextHint(true)
         playSmartAudio(reprompt, () => {
           setVoiceState('idle')
           if (shouldAutoListen(capturedFieldIndex)) startRecording()
@@ -438,6 +454,8 @@ export default function FormSession({
         })
         return
       }
+      // A real capture resets the empty streak.
+      emptyCaptureStreakRef.current = 0
 
       const fieldIndex = store.currentFieldIndex
       const currentField = fields[fieldIndex]

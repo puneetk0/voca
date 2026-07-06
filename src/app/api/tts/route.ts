@@ -95,8 +95,14 @@ export async function POST(req: Request) {
     const speakable = cleanText(text)
 
     // Priority 1: Sarvam bulbul:v3 — natural prosody, best-in-class on
-    // abbreviations, numerics and code-mixing. One retry on transient failure:
-    // a single blip must not drop the session to a lesser voice.
+    // abbreviations, numerics and code-mixing.
+    //
+    // ONE attempt with an 11s ceiling — deliberately no retry. The client
+    // aborts the whole /api/tts request at ~13s, so a second 9s Sarvam attempt
+    // used to push the server past that window and the client would give up on
+    // the (longest) opening line, dropping it to the silent browser voice.
+    // A single generous attempt fits inside the client budget and still lets a
+    // genuine failure fall through to Orpheus quickly.
     const sarvamKey = process.env.SARVAM_API_KEY
     if (sarvamKey) {
       // Tone shapes delivery: measured and steady for professional,
@@ -109,41 +115,36 @@ export async function POST(req: Request) {
         playful: { pace: 1.05, temperature: 0.8 },
       }[tone]
 
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const sarvamRes = await fetch('https://api.sarvam.ai/text-to-speech', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'api-subscription-key': sarvamKey,
-            },
-            body: JSON.stringify({
-              text: speakable,
-              target_language_code: lang === 'en' ? 'en-IN' : 'hi-IN',
-              model: 'bulbul:v3',
-              speaker: process.env.SARVAM_SPEAKER || 'priya',
-              pace,
-              temperature,
-              speech_sample_rate: 24000,
-            }),
-            signal: AbortSignal.timeout(9000),
-          })
+      try {
+        const sarvamRes = await fetch('https://api.sarvam.ai/text-to-speech', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'api-subscription-key': sarvamKey,
+          },
+          body: JSON.stringify({
+            text: speakable,
+            target_language_code: lang === 'en' ? 'en-IN' : 'hi-IN',
+            model: 'bulbul:v3',
+            speaker: process.env.SARVAM_SPEAKER || 'priya',
+            pace,
+            temperature,
+            speech_sample_rate: 24000,
+          }),
+          signal: AbortSignal.timeout(11000),
+        })
 
-          if (sarvamRes.ok) {
-            const sarvamData = await sarvamRes.json()
-            const audioContent = sarvamData?.audios?.[0]
-            if (audioContent) {
-              return NextResponse.json({ audioContent, format: 'wav' })
-            }
-          } else {
-            console.error('[TTS] Sarvam error:', sarvamRes.status, await sarvamRes.text().catch(() => ''))
-            // 4xx won't heal on retry; 5xx/timeouts get one more shot
-            if (sarvamRes.status < 500) break
+        if (sarvamRes.ok) {
+          const sarvamData = await sarvamRes.json()
+          const audioContent = sarvamData?.audios?.[0]
+          if (audioContent) {
+            return NextResponse.json({ audioContent, format: 'wav' })
           }
-        } catch (e: any) {
-          console.warn(`[TTS] Sarvam attempt ${attempt + 1} failed:`, e?.message)
+        } else {
+          console.error('[TTS] Sarvam error:', sarvamRes.status, await sarvamRes.text().catch(() => ''))
         }
-        if (attempt === 0) await new Promise(r => setTimeout(r, 250))
+      } catch (e: any) {
+        console.warn('[TTS] Sarvam failed:', e?.message)
       }
     }
 
