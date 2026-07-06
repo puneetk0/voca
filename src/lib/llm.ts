@@ -38,7 +38,9 @@ async function callGroq(apiKey: string, system: string, user: string, timeoutMs?
         { role: 'user', content: user },
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 600,
+      // 600 was truncating long (esp. Hindi/Devanagari) turns mid-JSON —
+      // the caller then had to salvage a malformed reply.
+      max_tokens: 1000,
     },
     { maxRetries: 0, ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}) },
   )
@@ -57,7 +59,7 @@ async function callCerebras(apiKey: string, system: string, user: string, timeou
         { role: 'user', content: user },
       ],
       response_format: { type: 'json_object' },
-      max_tokens: 600,
+      max_tokens: 1000,
     }),
     ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
   })

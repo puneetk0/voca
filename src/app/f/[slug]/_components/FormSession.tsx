@@ -31,7 +31,10 @@ const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAI
 // Generous budget: the server's worst case is ~8-12s (capped provider
 // timeouts). Aborting earlier only wastes the in-flight work and burns
 // rate limits with duplicate requests.
-const CONVERSE_TIMEOUT_MS = 15000
+// Must exceed the server's worst-case provider chain (Groq keys → Cerebras →
+// Gemini ≈ 12.5s + DB reads + cold start) or the client gives up on turns the
+// server was about to answer — paying for LLM calls nobody hears.
+const CONVERSE_TIMEOUT_MS = 20000
 const SLOW_HINT_MS = 4000
 
 /** One in-flight converse turn. `userAborted` distinguishes an intentional
@@ -110,6 +113,7 @@ export default function FormSession({
 
   // Session tracking (drop-off / timing / device analytics)
   const sessionIdRef = useRef<string | null>(null)
+  const sessionTrackedRef = useRef(false)
   const maxFieldReachedRef = useRef(0)
 
   // Direct entry: no choice screen. We auto-attempt the conversation on load;
@@ -259,8 +263,27 @@ export default function FormSession({
     return () => clearTimeout(t)
   }, [voiceState])
 
+  // When the opener's audio was blocked by autoplay policy, the greeting text
+  // is parked here and the next orb tap replays it (a tap IS the unlock
+  // gesture) instead of re-running the whole opening turn.
+  const pendingReplayRef = useRef<string | null>(null)
+
   // Begin the conversation exactly once (auto-start or first tap).
   function beginSession() {
+    if (pendingReplayRef.current) {
+      // Conversation already opened silently — this tap unlocks audio, so
+      // just speak the parked greeting.
+      const replay = pendingReplayRef.current
+      pendingReplayRef.current = null
+      setNeedsTap(false)
+      setStarted(true)
+      startedRef.current = true
+      playSmartAudio(replay, () => {
+        setVoiceState('idle')
+        if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
+      })
+      return
+    }
     if (startedRef.current) return
     startedRef.current = true
     setStarted(true)
@@ -342,6 +365,14 @@ export default function FormSession({
       isHandlingTranscriptRef.current = false
       isSpeakingRef.current = false
 
+      // A failed turn must not leave its debris around: the thinking
+      // placeholder would otherwise be displayed as if it were the question,
+      // and a stale "You said: X" pill would linger through the error state.
+      useConversationStore.getState().removeMessage('__ai_thinking__')
+      setPendingTranscript(null)
+      pillResolveRef.current?.(false)
+      pillResolveRef.current = null
+
       if (ui.fatal) {
         // Unrecoverable (no keys / closed / deleted) — block the session with
         // a clear explanation instead of an endless retry loop.
@@ -392,12 +423,23 @@ export default function FormSession({
     
     if (data.nextFieldIndex !== undefined) store.setNextField(data.nextFieldIndex)
 
-    if (data.aiMessage) {
-      const existingPlaceholder = store.history.some(m => m.id === '__ai_thinking__')
+    // Display falls back to the spoken text — if only one of the two came back
+    // from the LLM, the screen must still advance with the audio. (A missing
+    // displayedMessage used to leave the PREVIOUS question on screen while the
+    // voice asked the next one.)
+    const displayText = data.aiMessage || data.aiSpokenMessage
+    if (displayText) {
+      // MUST read live state, not the render snapshot: the placeholder was
+      // added in this same event tick, so the snapshot never contains it.
+      // The stale check left "Extracting your answer..." ghosts in history
+      // (polluting the LLM context and the stored transcript) and made
+      // replaceMessage later collapse two placeholders into duplicated,
+      // out-of-order messages.
+      const existingPlaceholder = useConversationStore.getState().history.some(m => m.id === '__ai_thinking__')
       const newMsg = {
         id: Date.now().toString(),
         role: 'ai' as const,
-        text: data.aiMessage,
+        text: displayText,
       }
       if (existingPlaceholder) {
         store.replaceMessage('__ai_thinking__', newMsg)
@@ -414,7 +456,21 @@ export default function FormSession({
     if (data.aiMessage || data.aiSpokenMessage) {
       onSuccess(data.aiSpokenMessage || data.aiMessage, actuallyComplete)
     } else {
+      // The turn produced no message at all — unlock everything so the session
+      // can continue (a locked isHandlingTranscriptRef here used to dead-end
+      // the whole conversation), and swap the thinking placeholder for a
+      // gentle reprompt instead of leaving "Extracting..." on screen.
       isSpeakingRef.current = false
+      isHandlingTranscriptRef.current = false
+      store.setIsAiTyping(false)
+      setVoiceState('idle')
+      if (useConversationStore.getState().history.some(m => m.id === '__ai_thinking__')) {
+        store.replaceMessage('__ai_thinking__', {
+          id: Date.now().toString(),
+          role: 'ai',
+          text: 'Sorry, I lost my train of thought. Could you say that again, or type it below?',
+        })
+      }
     }
   }, [form.id, store, fields, userEmail, killAudio])
 
@@ -594,8 +650,10 @@ export default function FormSession({
     store.addMessage({ id: '__ai_thinking__', role: 'ai', text: 'Setting things up...' })
 
     // Start a session for drop-off / timing / device analytics (best-effort).
-    // Preview runs are excluded from analytics entirely.
-    if (!isPreview) {
+    // Preview runs are excluded entirely; the sessionTracked guard keeps a
+    // greeting RETRY (error-orb tap) from double-counting the session.
+    if (!isPreview && !sessionTrackedRef.current) {
+      sessionTrackedRef.current = true
       try {
         startFormSession(form.id, parseDevice(navigator.userAgent), fields.length)
           .then(res => { if (res && 'sessionId' in res && res.sessionId) sessionIdRef.current = res.sessionId })
@@ -611,13 +669,27 @@ export default function FormSession({
 
     // Resume at the branch-aware frontier — first unanswered field ON THE PATH
     // (a plain first-unanswered scan would land on skipped branch questions).
-    const frontier = computePath(fields as BranchField[], store.answers).frontier
+    // Live state, NOT the render snapshot: on the auto-start path this runs
+    // from a render-1 closure captured BEFORE the localStorage draft restore,
+    // which silently restarted returning users at question 1.
+    const frontier = computePath(fields as BranchField[], useConversationStore.getState().answers).frontier
     const startFieldIndex = Math.min(frontier, fields.length - 1)
 
     await handleConverseResponse('Hello', startFieldIndex, 'voice', (aiMessage) => {
       playSmartAudio(aiMessage, () => {
         setVoiceState('idle')
         if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
+      }, {
+        // Autoplay got blocked after the silent-unlock probe passed (it can be
+        // flaky): don't "speak" silently into a dead speaker — park the
+        // greeting and show Tap to begin; the tap replays it audibly.
+        onAutoplayBlocked: () => {
+          pendingReplayRef.current = aiMessage
+          startedRef.current = false
+          setStarted(false)
+          setNeedsTap(true)
+          setVoiceState('idle')
+        },
       })
     }, prefillNote)
   }
@@ -677,20 +749,39 @@ export default function FormSession({
       formData.append('sentiments', JSON.stringify(pathSentiments))
       formData.append('history', JSON.stringify(store.history))
 
+      // Voice clips are a nicety — the ANSWERS must always make it through.
+      // Cap per-clip and total sizes so the payload stays under the server
+      // action body limit; oversized clips are dropped, never the submission.
+      const MAX_CLIP_BYTES = 4 * 1024 * 1024
+      const MAX_TOTAL_AUDIO_BYTES = 18 * 1024 * 1024
+      let audioBytes = 0
       Object.entries(store.audioBlobs).forEach(([fieldId, audioBlob]) => {
         if (!onPath.has(fieldId)) return
-        formData.append(`audio_${fieldId}`, audioBlob as Blob, `${fieldId}.webm`)
+        const blob = audioBlob as Blob
+        if (blob.size > MAX_CLIP_BYTES || audioBytes + blob.size > MAX_TOTAL_AUDIO_BYTES) {
+          console.warn(`[Submit] Skipping oversized audio clip for ${fieldId} (${Math.round(blob.size / 1024)}KB)`)
+          return
+        }
+        audioBytes += blob.size
+        formData.append(`audio_${fieldId}`, blob, `${fieldId}.webm`)
       })
 
       const result = await submitResponse(formData)
+      if (!result.success) {
+        // Coded failure from the action — show the real reason (server-action
+        // throws get masked in production, so the action returns these).
+        setSubmitError(result.error)
+        return
+      }
       try { localStorage.removeItem(ANSWERS_KEY) } catch { }
-      if (result.responseId) setSubmissionId(result.responseId)
+      setSubmissionId(result.responseId)
       setSubmissionTime(new Date().toLocaleString())
       playChime()
       store.setMode('success')
     } catch (e: any) {
+      // Transport-level failure (offline, payload rejected before the action ran)
       console.error(e)
-      setSubmitError(e?.message || 'Something went wrong. Please try again.')
+      setSubmitError('Could not reach the server. Check your connection and try again — your answers are still here.')
     } finally {
       setSubmitting(false)
     }
@@ -890,8 +981,11 @@ export default function FormSession({
                 if (voiceState === 'speaking') {
                   // Tap to skip the AI's speech.
                   killAudio()
-                  if (activeConverseRef.current) {
-                    // Reply still coming (this was the filler) — keep thinking.
+                  if (activeConverseRef.current || pillResolveRef.current) {
+                    // Reply still coming — either the converse fetch is in
+                    // flight, or it resolved and is parked behind the
+                    // correction pill (that gap used to open the mic and then
+                    // play the reply over it, spawning a second recorder).
                     setVoiceState('thinking')
                   } else {
                     isHandlingTranscriptRef.current = false
@@ -905,10 +999,30 @@ export default function FormSession({
                     }
                   }
                 }
+                if (voiceState === 'idle') {
+                  // "Tap the orb to resume" must actually work: re-open the
+                  // mic (voice fields), or re-run the greeting if it never
+                  // landed (initial converse failed before any question).
+                  const liveHistory = useConversationStore.getState().history
+                  const hasRealAiMessage = liveHistory.some(m => m.role === 'ai' && m.id !== '__ai_thinking__')
+                  if (!hasRealAiMessage) {
+                    handleInitialSequence()
+                  } else if (!isHandlingTranscriptRef.current && shouldAutoListen(useConversationStore.getState().currentFieldIndex)) {
+                    startRecording()
+                  }
+                }
                 if (voiceState === 'error') {
                   isHandlingTranscriptRef.current = false
                   setVoiceState('idle')
-                  if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) startRecording()
+                  const liveHistory = useConversationStore.getState().history
+                  const hasRealAiMessage = liveHistory.some(m => m.role === 'ai' && m.id !== '__ai_thinking__')
+                  if (!hasRealAiMessage) {
+                    // The greeting itself failed — retry it instead of opening
+                    // a mic with no question asked.
+                    handleInitialSequence()
+                  } else if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) {
+                    startRecording()
+                  }
                 }
               }}
               className={`relative z-10 w-[160px] h-[160px] rounded-full flex flex-col items-center justify-center transition-all duration-500 ${orbColour}`}
@@ -1060,7 +1174,10 @@ export default function FormSession({
 
         </motion.div>
 
-        {fields[store.currentFieldIndex]?.field_type === 'mcq' && fields[store.currentFieldIndex]?.options?.length > 0 && (
+        {/* Interactive inputs only exist once the conversation has begun —
+            pre-start, a stray tap/typed answer would run a hidden turn and
+            then collide with the greeting. */}
+        {started && fields[store.currentFieldIndex]?.field_type === 'mcq' && fields[store.currentFieldIndex]?.options?.length > 0 && (
           <motion.div 
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
@@ -1103,7 +1220,7 @@ export default function FormSession({
           </motion.div>
         )}
 
-        {fields[store.currentFieldIndex]?.field_type === 'file' && (
+        {started && fields[store.currentFieldIndex]?.field_type === 'file' && (
           <div className="w-full max-w-xs mx-auto mt-2 mb-4 px-4 relative z-20">
             <label className={`w-full flex flex-col justify-center items-center gap-2 px-4 py-6 border-2 border-dashed rounded-2xl cursor-pointer transition-colors ${
               isUploading
@@ -1136,13 +1253,21 @@ export default function FormSession({
                   setVoiceState('thinking')
 
                   const supabase = createClient()
-                  const ext = file.name.split('.').pop() || 'bin'
                   const safeBase = file.name.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40)
                   const fileName = `${Date.now()}-${safeBase}`
 
-                  const { error } = await supabase.storage
+                  // A stalled connection must not lock the session in
+                  // 'thinking' with a dead dropzone — 45s ceiling, then the
+                  // user can simply try again.
+                  const upload = supabase.storage
                     .from('user_files')
                     .upload(fileName, file, { contentType: file.type, upsert: false })
+                  const { error } = await Promise.race([
+                    upload,
+                    new Promise<{ error: { message: string } }>(resolve =>
+                      setTimeout(() => resolve({ error: { message: 'the upload timed out — please check your connection and try again' } }), 45000),
+                    ),
+                  ]) as { error: { message: string } | null }
 
                   setIsUploading(false)
 
@@ -1151,6 +1276,7 @@ export default function FormSession({
                     store.addMessage({ id: Date.now().toString(), role: 'ai', text: `Upload failed: ${error.message}` })
                     setVoiceState('idle')
                     // Don't restart mic for file fields — user needs to upload
+                    e.target.value = ''
                     return
                   }
 
@@ -1192,7 +1318,7 @@ export default function FormSession({
           </div>
         )}
 
-        <form onSubmit={handleSendVoiceText} className="w-full max-w-xs mx-auto pb-4 pt-6 z-20">
+        {started && <form onSubmit={handleSendVoiceText} className="w-full max-w-xs mx-auto pb-4 pt-6 z-20">
           <div className={`flex items-center gap-1 rounded-full px-5 transition-all duration-300 border ${
             showTextHint
               ? 'border-accent-amber/50 bg-accent-amber/5 ring-2 ring-accent-amber/20'
@@ -1222,7 +1348,7 @@ export default function FormSession({
               )}
             </AnimatePresence>
           </div>
-        </form>
+        </form>}
       </main>
     )
   }

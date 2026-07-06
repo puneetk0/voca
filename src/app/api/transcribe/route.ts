@@ -10,11 +10,11 @@ export const maxDuration = 30
 
 const url = process.env.UPSTASH_REDIS_REST_URL
 const redis = url && url.startsWith('http') ? Redis.fromEnv() : null
-// 200/hr: each answered question = 1 transcription, and shared IPs (campus
+// 600/hr: each answered question = 1 transcription, and shared IPs (campus
 // wifi, offices) can host many respondents at once.
 const ratelimit = redis ? new Ratelimit({
   redis,
-  limiter: Ratelimit.slidingWindow(200, "1 h"),
+  limiter: Ratelimit.slidingWindow(600, "1 h"),
 }) : null
 
 export async function POST(req: Request) {
@@ -35,10 +35,16 @@ export async function POST(req: Request) {
     if (file.size > 10 * 1024 * 1024) {
       return NextResponse.json({ error: 'Audio too large (max 10MB)', code: 'bad_request' }, { status: 413 })
     }
+    // Instant tap-stop / dead mic produces a near-empty blob — don't burn two
+    // provider calls to transcribe silence; the client's empty-transcript path
+    // handles the reprompt.
+    if (file.size < 1024) {
+      return NextResponse.json({ transcript: '', confidence: 0 })
+    }
 
     {
       const ip = clientIp(req.headers)
-      const allowed = await checkLimit(ratelimit, `transcribe_${ip}_${formId ?? 'admin'}`, { limit: 20, windowMs: 5 * 60_000 })
+      const allowed = await checkLimit(ratelimit, `transcribe_${ip}_${formId ?? 'admin'}`, { limit: 80, windowMs: 5 * 60_000 })
       if (!allowed) {
         return NextResponse.json(
           { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },
@@ -173,6 +179,10 @@ export async function POST(req: Request) {
 
   } catch (err: any) {
     console.error('Transcription error:', err)
-    return NextResponse.json({ error: err.message, code: 'upstream_down' }, { status: 500 })
+    // Never leak raw provider error text to the respondent
+    return NextResponse.json(
+      { error: "Couldn't process that audio. Please try again.", code: 'upstream_down' },
+      { status: 500 },
+    )
   }
 }

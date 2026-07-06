@@ -4,9 +4,13 @@ import { useRef, useCallback, useEffect, useState } from 'react'
 
 export type VoiceState = 'idle' | 'thinking' | 'speaking' | 'listening' | 'transcribing' | 'error'
 
+// Two fillers per language, not four: each one is a separate TTS request and
+// Sarvam's per-key concurrency is small — a 4-request burst at session start
+// used to queue BEHIND the opener's own TTS call and delay the first spoken
+// words by many seconds.
 const FILLERS: Record<'hi' | 'en', string[]> = {
-  hi: ["हाँ...", "अच्छा...", "हम्म...", "ठीक है..."],
-  en: ["Hmm...", "Okay...", "Right...", "Got it..."],
+  hi: ["अच्छा...", "ठीक है..."],
+  en: ["Okay...", "Got it..."],
 }
 
 // Long openers legitimately take Sarvam up to ~11s to synthesize. The server
@@ -31,6 +35,13 @@ export function useTTS(
   // element or speechSynthesis silently dies. Without it, isSpeakingRef can
   // stay true forever and the whole session locks up.
   const watchdogRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Playback generation: killAudio() and every new playSmartAudio() bump it,
+  // which invalidates any pending finalize from an older playback. Without
+  // this, speechSynthesis.cancel() during a barge-in fired the OLD utterance's
+  // error handler → its stale onEnd re-opened the mic mid-new-turn, and two
+  // barge-ins during browser speech falsely latched captions mode.
+  const generationRef = useRef(0)
 
   // Captions mode: after repeated total audio failures we stop trying to play
   // sound and instead give a silent "reading window" so the loop continues.
@@ -58,27 +69,31 @@ export function useTTS(
     return ok.length
   }, [formId])
 
-  // Prefetch ONLY the session's starting language eagerly (halves the request
-  // burst against the TTS rate limit); the other language loads on switch.
-  useEffect(() => {
-    let retryTimer: ReturnType<typeof setTimeout> | null = null
-    const timer = setTimeout(async () => {
-      try {
-        const count = await fetchFillers(languageRef.current)
+  // Filler prefetch is DEFERRED until the first real speech has finished (or a
+  // 15s fallback) so it never competes with the opener's TTS call for Sarvam's
+  // limited concurrency — that contention was a major cause of 20-30s starts.
+  const prefetchStartedRef = useRef(false)
+  const ensureFillers = useCallback(() => {
+    if (prefetchStartedRef.current) return
+    prefetchStartedRef.current = true
+    fetchFillers(languageRef.current)
+      .then(count => {
         fillerAudioRef.current = fillerCacheRef.current[languageRef.current]
         if (count === 0) {
-          console.warn('[TTS] all filler prefetches failed — latency masking disabled, retrying in 30s')
-          retryTimer = setTimeout(async () => {
-            await fetchFillers(languageRef.current)
-            fillerAudioRef.current = fillerCacheRef.current[languageRef.current]
+          // One quiet retry; fillers are a nicety, never worth a request storm.
+          setTimeout(() => {
+            fetchFillers(languageRef.current)
+              .then(() => { fillerAudioRef.current = fillerCacheRef.current[languageRef.current] })
+              .catch(() => { })
           }, 30000)
         }
-      } catch { }
-    }, 2000)
-    return () => {
-      clearTimeout(timer)
-      if (retryTimer) clearTimeout(retryTimer)
-    }
+      })
+      .catch(() => { })
+  }, [fetchFillers])
+
+  useEffect(() => {
+    const fallback = setTimeout(ensureFillers, 15000)
+    return () => clearTimeout(fallback)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [formId])
 
@@ -104,6 +119,7 @@ export function useTTS(
   const killAudio = useCallback(() => {
     // Intentional interruption: silence everything WITHOUT firing onEnd —
     // the caller is starting a new flow and must not get a stale mic-restart.
+    generationRef.current++ // invalidate any pending finalize (incl. browser-TTS handlers and captions timers)
     clearWatchdog()
     isSpeakingRef.current = false
     window.speechSynthesis?.cancel()
@@ -135,7 +151,11 @@ export function useTTS(
     } catch { }
   }, [])
 
-  const playSmartAudio = useCallback(async (text: string, onEnd: () => void) => {
+  const playSmartAudio = useCallback(async (
+    text: string,
+    onEnd: () => void,
+    opts?: { onAutoplayBlocked?: () => void },
+  ) => {
     isSpeakingRef.current = true
     setVoiceState('speaking')
     window.speechSynthesis?.cancel()
@@ -145,15 +165,22 @@ export function useTTS(
       audioRef.current.currentTime = 0
     }
 
+    // This playback's generation. killAudio() or a newer playSmartAudio()
+    // bumping the counter makes every callback of THIS playback a no-op.
+    const gen = ++generationRef.current
+
     // Single-fire finalization: every completion path (natural end, error,
-    // watchdog) funnels through here exactly once.
+    // watchdog) funnels through here exactly once — and only while this
+    // playback is still the live one.
     let done = false
     const finalize = (viaWatchdog = false) => {
-      if (done) return
+      if (done || gen !== generationRef.current) return
       done = true
       clearWatchdog()
       isSpeakingRef.current = false
       if (viaWatchdog) console.warn('[TTS] watchdog fired — audio never signaled completion')
+      // First completed speech = safe moment to warm the filler cache.
+      ensureFillers()
       onEnd()
     }
     const armWatchdog = () => {
@@ -186,9 +213,14 @@ export function useTTS(
       if (preferred) utterance.voice = preferred
       utterance.rate = 1.05
       utterance.onend = () => { ttsFailStreakRef.current = 0; finalize() }
-      utterance.onerror = () => {
-        ttsFailStreakRef.current++
-        if (ttsFailStreakRef.current >= 2) setCaptionsMode(true)
+      utterance.onerror = (e: SpeechSynthesisErrorEvent) => {
+        // A cancel from killAudio (barge-in) is NOT a failure — counting it
+        // toward the streak used to falsely latch captions mode after two
+        // interruptions, muting a perfectly working session.
+        if (e?.error !== 'canceled' && e?.error !== 'interrupted') {
+          ttsFailStreakRef.current++
+          if (ttsFailStreakRef.current >= 2) setCaptionsMode(true)
+        }
         finalize()
       }
       armWatchdog()
@@ -218,10 +250,21 @@ export function useTTS(
       audio.onerror = () => { console.warn('[TTS] playback error, finalizing'); finalize() }
       armWatchdog()
       await audio.play().catch(() => { throw new Error('autoplay blocked') })
-    } catch {
+    } catch (err: any) {
+      // An autoplay block means NO sound can start without a user gesture —
+      // browser speech would be just as silently blocked. When the caller gave
+      // us an escape hatch (the opener does), hand control back so it can show
+      // a tap-to-play affordance instead of a mute "speaking" state.
+      if (err?.message === 'autoplay blocked' && opts?.onAutoplayBlocked) {
+        done = true
+        clearWatchdog()
+        isSpeakingRef.current = false
+        opts.onAutoplayBlocked()
+        return
+      }
       speakWithBrowser()
     }
-  }, [formId, setVoiceState, captionsMode, clearWatchdog])
+  }, [formId, setVoiceState, captionsMode, clearWatchdog, ensureFillers])
 
   return {
     audioRef,

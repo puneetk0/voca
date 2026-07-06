@@ -29,6 +29,7 @@ interface ConversationState {
   setMode: (mode: InputMode) => void
   addMessage: (msg: Message) => void
   replaceMessage: (id: string, newMsg: Message) => void
+  removeMessage: (id: string) => void
   setAnswer: (fieldId: string, value: string) => void
   setSentiment: (fieldId: string, sentiment: string) => void
   setAudioBlob: (fieldId: string, blob: Blob) => void
@@ -68,6 +69,9 @@ export const useConversationStore = create<ConversationState>()((set) => ({
   addMessage: (msg) => set((state) => ({ history: [...state.history, msg] })),
   replaceMessage: (id, newMsg) => set((state) => ({
     history: state.history.map(m => m.id === id ? newMsg : m)
+  })),
+  removeMessage: (id) => set((state) => ({
+    history: state.history.filter(m => m.id !== id)
   })),
   setAnswer: (fieldId, value) => set((state) => ({ answers: { ...state.answers, [fieldId]: value } })),
   setSentiment: (fieldId, sentiment) => set((state) => ({ sentiments: { ...state.sentiments, [fieldId]: sentiment } })),

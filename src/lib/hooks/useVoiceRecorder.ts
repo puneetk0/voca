@@ -33,6 +33,13 @@ export function useVoiceRecorder(
   const audioChunks = useRef<BlobPart[]>([])
   const micStreamRef = useRef<MediaStream | null>(null)
   const shouldIgnoreNextStopRef = useRef(false)
+  // Reentrancy guard: two overlapping startRecording calls (rapid orb taps)
+  // used to run two live recorders sharing one chunk buffer — corrupted audio
+  // and a leaked mic stream.
+  const isStartingRef = useRef(false)
+  // Abort epoch: stopRecording(true) bumps it, which also voids any
+  // transcription ALREADY in flight (the old flag only worked pre-stop).
+  const epochRef = useRef(0)
 
   // VAD refs
   const vadIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -67,13 +74,23 @@ export function useVoiceRecorder(
 
   const stopRecording = useCallback((ignoreTranscription = false) => {
     clearVAD()
+    if (ignoreTranscription) {
+      // Void this capture AND any transcription already in flight.
+      shouldIgnoreNextStopRef.current = true
+      epochRef.current++
+    }
     if (mediaRecorder.current && mediaRecorder.current.state !== 'inactive') {
-      if (ignoreTranscription) shouldIgnoreNextStopRef.current = true
       mediaRecorder.current.stop()
     }
   }, [clearVAD])
 
   const startRecording = useCallback(async () => {
+    // Reentrancy guard — a second call while one recorder is starting or live
+    // must be a no-op, not a parallel recorder.
+    if (isStartingRef.current) return
+    if (mediaRecorder.current && mediaRecorder.current.state === 'recording') return
+    isStartingRef.current = true
+
     // Clean up any lingering stream from a previous session
     if (micStreamRef.current) {
       micStreamRef.current.getTracks().forEach(t => t.stop())
@@ -117,6 +134,9 @@ export function useVoiceRecorder(
         clearVAD()
         const wasIgnored = shouldIgnoreNextStopRef.current
         shouldIgnoreNextStopRef.current = false
+        // Capture the epoch: if a barge-in voids this capture while the
+        // transcription request is still in flight, we drop its result.
+        const epoch = epochRef.current
 
         setIsRecording(false)
         setStream(null)
@@ -152,8 +172,12 @@ export function useVoiceRecorder(
           const data = await res.json()
           if (!res.ok) throw new Error(data.error)
 
+          // Stale result (a barge-in superseded this capture) — drop silently.
+          if (epoch !== epochRef.current) return
+
           onTranscriptionRef.current(data.transcript || '', audioBlob, data.confidence || 1.0)
         } catch (e: any) {
+          if (epoch !== epochRef.current) return
           setError(e.message)
           console.error('Transcription failed:', e)
           // Still call onTranscription with empty string so UI can handle the error gracefully
@@ -284,6 +308,8 @@ export function useVoiceRecorder(
         setError('Could not access microphone.')
       }
       console.error('[Recorder] getUserMedia failed:', e)
+    } finally {
+      isStartingRef.current = false
     }
   }, [formId, clearVAD, stopRecording])
 

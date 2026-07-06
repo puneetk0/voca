@@ -13,7 +13,7 @@ export async function startFormSession(formId: string, device: DeviceInfo, total
     // Anonymous insert — throttle per IP and verify the form is real so a
     // script can't fill the table with junk rows for made-up form ids.
     const ip = clientIp(await headers())
-    const allowed = await checkLimit(null, `session_${ip}`, { limit: 20, windowMs: 10 * 60_000 })
+    const allowed = await checkLimit(null, `session_${ip}`, { limit: 60, windowMs: 10 * 60_000 })
     if (!allowed) return { error: 'rate_limited' }
 
     const { data: form } = await supabaseAdmin

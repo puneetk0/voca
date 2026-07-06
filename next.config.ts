@@ -18,6 +18,14 @@ const csp = [
 ].join('; ')
 
 const nextConfig: NextConfig = {
+  experimental: {
+    serverActions: {
+      // Submissions carry the respondent's voice-answer clips (WebM/Opus —
+      // recordings can run minutes). The 1MB default made submitResponse
+      // reject any form with real audio: the "error on submit" bug.
+      bodySizeLimit: '25mb',
+    },
+  },
   async headers() {
     return [
       {

@@ -11,7 +11,7 @@ const url = process.env.UPSTASH_REDIS_REST_URL
 const redis = url && url.startsWith('http') ? Redis.fromEnv() : null
 const ratelimit = redis ? new Ratelimit({
   redis,
-  limiter: Ratelimit.slidingWindow(500, "1 h"),
+  limiter: Ratelimit.slidingWindow(1500, "1 h"),
 }) : null
 
 // Speakability normalizer. Bulbul v3 accepts up to 2500 chars per request, so
@@ -71,7 +71,7 @@ export async function POST(req: Request) {
     }
 
     const ip = clientIp(req.headers)
-    const allowed = await checkLimit(ratelimit, `tts_${ip}_${formId}`, { limit: 60, windowMs: 5 * 60_000 })
+    const allowed = await checkLimit(ratelimit, `tts_${ip}_${formId}`, { limit: 150, windowMs: 5 * 60_000 })
     if (!allowed) {
       return NextResponse.json({ error: 'Rate limit exceeded', code: 'rate_limited' }, { status: 429 })
     }

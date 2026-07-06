@@ -17,7 +17,7 @@ const ratelimit = redis ? new Ratelimit({
   redis,
   // Rate limit keyed on IP only — NOT formId, which is user-supplied and
   // could be spoofed to get a fresh window per request.
-  limiter: Ratelimit.slidingWindow(500, "1 h"),
+  limiter: Ratelimit.slidingWindow(1500, "1 h"),
 }) : null
 
 // Per-field-type validation rules injected into the system prompt.
@@ -53,7 +53,7 @@ FIELD TYPE: Phone number
     case 'textarea':
       return `
 FIELD TYPE: Long text / paragraph
-- Accept the full response as-is. Don't truncate or summarize.
+- Extract their answer following the ANSWER FIDELITY rules exactly — their full wording, only fillers removed. Don't truncate or summarize.
 - If the response seems very short for a textarea field, you can gently ask: "Want to add anything else, or is that good?"`
 
     case 'file':
@@ -71,7 +71,7 @@ FIELD TYPE: File Upload (Document, Resume, Image, etc.)
     }
 
     default:
-      return `FIELD TYPE: Short text — accept the response as-is after cleaning up obvious transcription noise.`
+      return `FIELD TYPE: Short text — extract their answer following the ANSWER FIDELITY rules exactly (their words, only fillers removed).`
   }
 }
 
@@ -220,6 +220,16 @@ ${TONE_PRESETS[persona.aiTone]}
 - If someone hesitates or rambles, be warm and accepting.
 - PROGRESS: once past the halfway point of the form, briefly acknowledge momentum ONCE ("more than halfway, this is quick") — never mention it again after that.
 
+ANSWER FIDELITY (how to fill extractedValues for text answers — non-negotiable):
+You are a careful transcriber of THEIR answer, not an editor of it.
+- PRESERVE the respondent's own words and sentence structure.
+- Remove ONLY: filler sounds ("um", "uh", "hmm", "haan" as filler), false starts, stutters, and immediate word repetitions.
+- NEVER paraphrase, summarize, shorten, or "improve" their phrasing.
+Example — they say: "I like Snapchat because umm the feature it has, the streak one, it's fascinating."
+  CORRECT extraction: "I like Snapchat because the feature it has, the streak one, it's fascinating."
+  WRONG extraction: "Snapchat because of streak feature." (this is editing, never do it)
+(Emails, phone numbers and numbers still get normalized per their FIELD TYPE rules. mcq must be the exact option string.)
+
 FORMAT RULES (responses are read aloud by a voice engine — non-negotiable):
 - Zero markdown. No asterisks, lists, headers, bullets. Ever.
 - Maximum ONE question per response. Maximum TWO sentences total (except the opening turn, which may use three short ones).
@@ -283,7 +293,9 @@ export async function POST(req: Request) {
     // Key on IP only — not formId (user-supplied, spoofable).
     // In-memory fallback keeps a limit even without Upstash.
     const ip = clientIp(req.headers)
-    const allowed = await checkLimit(ratelimit, `converse_${ip}`, { limit: 30, windowMs: 5 * 60_000 })
+    // Shared-NAT friendly (a classroom on campus wifi is ONE ip): budget for
+    // ~10 concurrent respondents, not one. Upstash (hourly) is the backstop.
+    const allowed = await checkLimit(ratelimit, `converse_${ip}`, { limit: 120, windowMs: 5 * 60_000 })
     if (!allowed) {
       return NextResponse.json(
         { error: "You're going a bit fast. Please wait a moment before continuing.", code: 'rate_limited' },
@@ -300,7 +312,16 @@ export async function POST(req: Request) {
     ])
 
     const form = formResult.data
-    if (!form) return NextResponse.json({ error: 'Form not found', code: 'not_found' }, { status: 404 })
+    if (!form) {
+      // Distinguish "row genuinely missing" from a transient DB error — a
+      // 2-second Supabase blip must NOT render the fatal "form not found"
+      // dead-end that permanently ends a live respondent's session.
+      if (formResult.error && formResult.error.code !== 'PGRST116') {
+        console.error('[Converse] form fetch failed:', formResult.error.message)
+        return NextResponse.json({ error: 'Temporary hiccup — please try again.', code: 'upstream_down' }, { status: 502 })
+      }
+      return NextResponse.json({ error: 'Form not found', code: 'not_found' }, { status: 404 })
+    }
     if (!form.is_active) {
       // Owner bypass: allow the creator to preview a paused form.
       const supabase = await createClient()
@@ -322,11 +343,32 @@ export async function POST(req: Request) {
 
     const fields = fieldsResult.data
     if (!fields || fields.length === 0) {
+      // Same transient-vs-real distinction as the form fetch above.
+      if (fieldsResult.error) {
+        console.error('[Converse] fields fetch failed:', fieldsResult.error.message)
+        return NextResponse.json({ error: 'Temporary hiccup — please try again.', code: 'upstream_down' }, { status: 502 })
+      }
       return NextResponse.json({ error: 'This form has no questions configured.', code: 'no_fields' }, { status: 422 })
     }
 
     const currentField = fields[currentFieldIndex]
     if (!currentField) {
+      // Post-completion turn: the user typed/spoke while the goodbye was still
+      // playing and the index already sits past the last field. Resolve it
+      // gracefully — a 422 here put the client in a "Hit a snag" retry loop
+      // that could never succeed.
+      if (typeof currentFieldIndex === 'number' && currentFieldIndex >= fields.length) {
+        const doneMsg = "You're all done — just review your answers below and submit."
+        return NextResponse.json({
+          aiSpokenMessage: doneMsg,
+          aiMessage: doneMsg,
+          extractedValues: {},
+          nextFieldIndex: fields.length,
+          sentiment: 'neutral',
+          language: currentLanguage === 'hi' ? 'hi' : 'en',
+          isComplete: true,
+        })
+      }
       return NextResponse.json({ error: 'Invalid field index.', code: 'bad_request' }, { status: 422 })
     }
 
@@ -485,11 +527,27 @@ IMPORTANT: identify which option they chose, then in the SAME reply ask that opt
         parsed.spokenMessage = (parsed as any).aiMessage
         parsed.displayedMessage = (parsed as any).aiMessage
       }
-    } catch {
-      parsed = {
-        spokenMessage: responseText.slice(0, 200),
-        displayedMessage: responseText.slice(0, 200)
+      // The two message fields must ALWAYS both exist: a missing
+      // displayedMessage left the previous question frozen on screen while
+      // the voice asked the next one.
+      if (!parsed.displayedMessage && parsed.spokenMessage) parsed.displayedMessage = parsed.spokenMessage
+      if (!parsed.spokenMessage && parsed.displayedMessage) parsed.spokenMessage = parsed.displayedMessage
+      if (!parsed.spokenMessage) {
+        // Parseable JSON but no message in any shape — never ship an empty turn
+        const canned = 'Sorry, could you say that once more?'
+        parsed.spokenMessage = canned
+        parsed.displayedMessage = canned
       }
+    } catch {
+      // Malformed/truncated JSON. Salvage the spoken line if it made it into
+      // the output — NEVER read raw JSON braces and field UUIDs aloud (which
+      // is exactly what slicing responseText used to do).
+      let spoken = 'Sorry, I tripped over my own words there. Could you say that once more?'
+      const salvage = /"spokenMessage"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(responseText)?.[1]
+      if (salvage) {
+        try { spoken = JSON.parse(`"${salvage}"`) } catch { /* keep canned */ }
+      }
+      parsed = { spokenMessage: spoken, displayedMessage: spoken }
     }
 
     // Support legacy scalar extraction or new multi-intent map
@@ -551,6 +609,13 @@ IMPORTANT: identify which option they chose, then in the SAME reply ask that opt
       }
     }
     nextIndex = Math.max(0, Math.min(Number.isInteger(nextIndex) ? nextIndex : currentFieldIndex, fields.length))
+    // Linear forms advance at most one step per turn (corrections keep the
+    // index in place; the anti-forward-fill guard strips multi-jumps anyway).
+    // Without this, a hallucinated nextFieldIndex could skip questions or
+    // end the form early with answers silently missing.
+    if (!branchingActive && tapResolvedNext === null) {
+      nextIndex = Math.min(nextIndex, currentFieldIndex + 1)
+    }
 
     // Epic 7: Confidence-based sentiment correction to prevent false positives
     let finalSentiment = parsed.sentiment || 'neutral'

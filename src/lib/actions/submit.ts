@@ -1,17 +1,33 @@
 'use server'
+import { after } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { sendResponseNotification } from '@/lib/email'
 import { onPathFieldIds, hasBranching, type BranchField } from '@/lib/branching'
 
-export async function submitResponse(formData: FormData) {
+// Server-action throws get MASKED in production (digest only) — the client
+// would see a useless generic message. Every failure here returns a coded
+// result instead, so the UI can say something true and the user knows whether
+// retrying helps.
+export type SubmitResult =
+  | { success: true; responseId: string }
+  | { success: false; error: string; retryable: boolean }
+
+export async function submitResponse(formData: FormData): Promise<SubmitResult> {
   const supabase = supabaseAdmin
 
-  const formId = formData.get('formId') as string
-  const inputMethod = formData.get('inputMethod') as string
-  const sessionId = (formData.get('sessionId') as string | null) || null
-  const answers = JSON.parse(formData.get('answers') as string)
-  const sentiments = JSON.parse(formData.get('sentiments') as string || '{}')
-  const history = JSON.parse(formData.get('history') as string)
+  let formId: string, inputMethod: string, sessionId: string | null
+  let answers: Record<string, string>, sentiments: Record<string, string>, history: unknown
+  try {
+    formId = formData.get('formId') as string
+    inputMethod = formData.get('inputMethod') as string
+    sessionId = (formData.get('sessionId') as string | null) || null
+    answers = JSON.parse(formData.get('answers') as string)
+    sentiments = JSON.parse(formData.get('sentiments') as string || '{}')
+    history = JSON.parse(formData.get('history') as string)
+    if (!formId || typeof answers !== 'object' || answers === null) throw new Error('bad payload')
+  } catch {
+    return { success: false, error: 'The submission data was malformed. Please try again.', retryable: true }
+  }
 
   // 1. Insert Response
   const { data: response, error: responseErr } = await supabase
@@ -20,7 +36,10 @@ export async function submitResponse(formData: FormData) {
     .select('id')
     .single()
 
-  if (responseErr) throw new Error(responseErr.message)
+  if (responseErr || !response) {
+    console.error('[Submit] response insert failed:', responseErr?.message)
+    return { success: false, error: "Couldn't save your response. Please try submitting again.", retryable: true }
+  }
 
   // Extract all audio blobs from formData
   const audioBlobs: Record<string, Blob> = {}
@@ -80,15 +99,21 @@ export async function submitResponse(formData: FormData) {
       }
 
       const sentiment = sentiments[field_id] || null
-      return { response_id: response.id, field_id, value: value as string, audio_url, sentiment }
+      // Coerce defensively — a non-string value must never fail the insert
+      const cleanValue = typeof value === 'string' ? value : String(value ?? '')
+      if (!cleanValue) return null
+      return { response_id: response.id, field_id, value: cleanValue, audio_url, sentiment }
     })
   )).filter(Boolean) as any[]
 
   if (answersToInsert.length > 0) {
     const { error: answersErr } = await supabase.from('answers').insert(answersToInsert)
     if (answersErr) {
-       console.error('Error inserting answers:', answersErr)
-       throw new Error(`Failed to save answers: ${answersErr.message}`)
+      console.error('Error inserting answers:', answersErr)
+      // Roll back the response row so a retry doesn't leave a phantom empty
+      // response (and a duplicate once the retry succeeds).
+      await supabase.from('responses').delete().eq('id', response.id)
+      return { success: false, error: "Couldn't save your answers. Please try submitting again.", retryable: true }
     }
   }
 
@@ -121,24 +146,30 @@ export async function submitResponse(formData: FormData) {
     }
   }
 
-  // 5. Email notification — fire and forget, don't block the response.
+  // 5. Email notification — after() keeps the serverless function alive until
+  //    it finishes (a bare fire-and-forget promise gets dropped on freeze).
   //    Respect the per-form toggle (defaults to on when the column is null).
   if (formResult.data && formResult.data.email_notifications !== false) {
     const { user_id, title } = formResult.data
-    supabase.auth.admin.getUserById(user_id).then(({ data }) => {
-      const email = data?.user?.email
-      if (!email) return
-      return sendResponseNotification({
-        toEmail: email,
-        formTitle: title,
-        formId,
-        fields: validFields,
-        // Same path filter as the insert — off-path answers stay out of the email
-        answers: Object.fromEntries(
-          Object.entries(answers as Record<string, string>).filter(([id]) => validFieldIds.has(id)),
-        ),
-      })
-    }).catch(err => console.error('[Email] Failed to send response notification:', err))
+    after(async () => {
+      try {
+        const { data } = await supabase.auth.admin.getUserById(user_id)
+        const email = data?.user?.email
+        if (!email) return
+        await sendResponseNotification({
+          toEmail: email,
+          formTitle: title,
+          formId,
+          fields: validFields,
+          // Same path filter as the insert — off-path answers stay out of the email
+          answers: Object.fromEntries(
+            Object.entries(answers).filter(([id]) => validFieldIds.has(id)),
+          ),
+        })
+      } catch (err: any) {
+        console.error('[Email] Failed to send response notification:', err?.message)
+      }
+    })
   }
 
   return { success: true, responseId: response.id }
