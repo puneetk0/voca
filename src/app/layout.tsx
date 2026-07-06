@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Lora, DM_Mono } from "next/font/google";
 import { Toaster } from "sonner";
 import { PostHogProvider } from "@/components/PostHogProvider";
+import ChunkReloadGuard from "@/components/ChunkReloadGuard";
 import "./globals.css";
 
 const lora = Lora({
@@ -69,6 +70,7 @@ export default function RootLayout({
             opacity: 0.04,
           }}
         />
+        <ChunkReloadGuard />
         <PostHogProvider>
           <div className="relative z-10 flex flex-col min-h-full">
             {children}
