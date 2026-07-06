@@ -115,6 +115,9 @@ export default function FormSession({
   const sessionIdRef = useRef<string | null>(null)
   const sessionTrackedRef = useRef(false)
   const maxFieldReachedRef = useRef(0)
+  // True when a saved draft was restored on load — the opening turn resumes
+  // instead of greeting from scratch.
+  const resumeRef = useRef(false)
 
   // Direct entry: no choice screen. We auto-attempt the conversation on load;
   // if the browser blocks audio without a gesture, the orb becomes the single
@@ -182,7 +185,11 @@ export default function FormSession({
         const saved = localStorage.getItem(ANSWERS_KEY)
         if (saved) {
           const parsed = JSON.parse(saved) as Record<string, string>
-          Object.entries(parsed).forEach(([id, val]) => store.setAnswer(id, val))
+          const restored = Object.entries(parsed).filter(([id]) => fields.some(f => f.id === id))
+          restored.forEach(([id, val]) => store.setAnswer(id, val))
+          // A draft with real answers means this is a reload mid-session — the
+          // opener must welcome them back and resume, not restart at Q1.
+          if (restored.length > 0) resumeRef.current = true
         }
       } catch { }
     }
@@ -319,6 +326,7 @@ export default function FormSession({
     extraContext?: string,
     confidence?: number,
     tappedOption?: string,
+    resume?: boolean,
   ) => {
     store.setIsAiTyping(true)
     store.setConnectionLost(false)
@@ -345,6 +353,7 @@ export default function FormSession({
         answers: useConversationStore.getState().answers,
         ...(tappedOption ? { tappedOption } : {}),
         ...(extraContext ? { extraContext } : {}),
+        ...(resume ? { resume: true } : {}),
         confidence,
       },
       turn,
@@ -675,6 +684,7 @@ export default function FormSession({
     const frontier = computePath(fields as BranchField[], useConversationStore.getState().answers).frontier
     const startFieldIndex = Math.min(frontier, fields.length - 1)
 
+    const isResume = resumeRef.current && startFieldIndex > 0
     await handleConverseResponse('Hello', startFieldIndex, 'voice', (aiMessage) => {
       playSmartAudio(aiMessage, () => {
         setVoiceState('idle')
@@ -691,7 +701,7 @@ export default function FormSession({
           setVoiceState('idle')
         },
       })
-    }, prefillNote)
+    }, prefillNote, undefined, undefined, isResume)
   }
 
   // --- INLINE TEXT HANDLER (unified — feeds same TTS+mic loop as voice) ---
@@ -838,6 +848,10 @@ export default function FormSession({
   if (store.mode === 'voice' || store.mode === 'choice') {
     const lastAiText = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text ?? ''
     const isThinking = voiceState === 'thinking' || voiceState === 'transcribing'
+    // Show the listening treatment whenever the mic is actually open, even if
+    // voiceState momentarily desyncs — the green orb + "tap when done" must
+    // always match a stoppable recorder.
+    const showListening = voiceState === 'listening' || (isRecording && voiceState !== 'transcribing')
     // Path-aware progress: on branched forms the position/total follow the
     // taken path (identical to index math on linear forms).
     const path = computePath(fields as BranchField[], store.answers)
@@ -849,7 +863,7 @@ export default function FormSession({
       ? 'bg-accent-amber/15 border border-accent-amber/30 shadow-[0_0_60px_rgba(234,140,20,0.2)]'
       : voiceState === 'speaking'
         ? 'bg-gradient-to-br from-amber-400 to-orange-500 shadow-[0_0_80px_rgba(251,191,36,0.35)]'
-        : voiceState === 'listening'
+        : showListening
           ? 'bg-gradient-to-br from-lime-400 to-emerald-500 shadow-[0_0_80px_rgba(163,230,53,0.35)]'
           : voiceState === 'error'
             ? 'bg-red-500/80'
@@ -941,7 +955,7 @@ export default function FormSession({
           {/* Orb */}
           <div className="relative flex items-center justify-center" style={{ width: 160, height: 160 }}>
             {/* Outer pulse ring — only when listening */}
-            {voiceState === 'listening' && (
+            {showListening && (
               <motion.div
                 className="absolute inset-0 rounded-full bg-lime-400/20"
                 animate={{ scale: [1, 1.5, 1], opacity: [0.5, 0, 0.5] }}
@@ -949,7 +963,7 @@ export default function FormSession({
               />
             )}
             {/* Second inner ring — listening */}
-            {voiceState === 'listening' && (
+            {showListening && (
               <motion.div
                 className="absolute inset-4 rounded-full bg-lime-400/10"
                 animate={{ scale: [1, 1.25, 1], opacity: [0.4, 0, 0.4] }}
@@ -977,7 +991,12 @@ export default function FormSession({
                   beginSession()
                   return
                 }
-                if (voiceState === 'listening') stopRecording()
+                // STOP is checked against the authoritative recorder state, not
+                // voiceState — the two can desync, and since the mic no longer
+                // auto-stops, a tap that relied on voiceState==='listening'
+                // would leave the user recording forever with no way out.
+                if (isRecording) { stopRecording(); return }
+                if (voiceState === 'listening') { stopRecording(); return }
                 if (voiceState === 'speaking') {
                   // Tap to skip the AI's speech.
                   killAudio()
@@ -1083,7 +1102,7 @@ export default function FormSession({
 
           {/* Listening indicator — the mic stays open until the orb is tapped */}
           <AnimatePresence>
-            {showDoneHint && voiceState === 'listening' && (
+            {showDoneHint && showListening && (
               <motion.p
                 initial={{ opacity: 0, y: 4 }}
                 animate={{ opacity: 1, y: 0 }}

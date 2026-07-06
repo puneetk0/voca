@@ -119,6 +119,7 @@ function buildSystemPrompt(
   currentFieldOptions?: string[],
   currentLanguage: 'hi' | 'en' = 'en',
   persona: Persona = { aiContext: null, aiTone: 'friendly', welcomeMessage: null },
+  resuming = false,
 ): string {
   let fieldRules = getFieldRules(fieldType, userEmail)
 
@@ -184,7 +185,12 @@ ${isHindi ? `- Respond in natural, conversational Hindi (Devanagari script) in s
 - extractedValues MUST always be in English/Latin script, never Hindi script. Transliterate: "पुनीत" → "Puneet".
 - displayedMessage MUST always be in English regardless of language.
 
-OPENING HOOK (ONLY on the very first turn — when conversation history is empty):
+${resuming
+  ? `WELCOME BACK (this respondent already answered earlier questions and just returned — conversation history was lost on a page reload, but their previous answers are safe):
+Do NOT greet them as if brand new and do NOT restart from the first question. In ONE short, warm sentence, acknowledge they're picking up where they left off, then ask THIS question again: "${currentFieldLabel}".
+Example shape: "Welcome back! Let's continue — ${currentFieldLabel.toLowerCase().replace(/\\?$/, '')}?"
+extractedValues must be {} (they haven't answered THIS question yet) and nextFieldIndex must stay on the current question.`
+  : `OPENING HOOK (ONLY on the very first turn — when conversation history is empty):
 This is the single most important line of the whole conversation. It must feel like a warm host greeting a guest, never a bot reading a title. Build it in THREE beats (up to 3 short sentences — the usual 2-sentence limit is relaxed for THIS turn only):
 1. Warm gratitude tied to what this is actually about${persona.aiContext?.trim() ? ' (use the CREATOR CONTEXT — name the event/purpose specifically)' : ` (use the form title "${formTitle}" naturally, never robotically)`}.
 2. Set the expectation in one friendly clause: a few quick questions to get to know them better.
@@ -195,7 +201,7 @@ ${persona.welcomeMessage?.trim()
   ? `The form creator wrote this welcome — use it as beats 1 and 2 (translate naturally to ${isHindi ? 'Hindi' : 'English'} if needed), then add beat 3 yourself: "${persona.welcomeMessage.trim()}"`
   : ''}
 Keep it natural. Do NOT mention how long it will take. Do NOT ask about language.
-extractedValues must be {} and nextFieldIndex must be 0.
+extractedValues must be {} and nextFieldIndex must be 0.`}
 
 CORRECTION HANDLING (applies throughout the entire conversation):
 If the user's message contains a correction to a PREVIOUS answer — signals like "actually", "wait", "no that's wrong", "I meant", "not X but Y", "that was wrong", "change my [field]", "my [field] should be" — do this:
@@ -282,6 +288,7 @@ export async function POST(req: Request) {
       currentLanguage,
       answers: rawAnswers,
       tappedOption: rawTappedOption,
+      resume,
     } = await req.json()
 
     // Server-side input caps — never trust client-declared sizes
@@ -384,6 +391,15 @@ export async function POST(req: Request) {
     const branchFields = fields as BranchField[]
     const branchingActive = hasBranching(branchFields)
 
+    // Resume detection: a page reload restores answers but NOT the chat history,
+    // so a returning respondent arrives with empty history yet a currentFieldIndex
+    // past 0. Without this, the server ran its opening-hook (greet + ask Q1),
+    // which fought the client's restored progress bar. On resume we welcome them
+    // back and re-ask the CURRENT question, forcing the index to stay put.
+    const isFirstTurn = history.length === 0
+    const resuming = (resume === true || isFirstTurn) && currentFieldIndex > 0 &&
+      Object.keys(knownAnswers).length > 0
+
     // MCQ taps carry the exact chosen option — zero LLM trust needed for
     // either the extraction or the routing. Accept the explicit param, or
     // fall back to the legacy "[User tapped: X]" message shape.
@@ -418,6 +434,7 @@ export async function POST(req: Request) {
       currentField.options ?? undefined,
       lang,
       { aiContext: form.ai_context ?? null, aiTone: tone, welcomeMessage: form.welcome_message ?? null },
+      resuming,
     )
 
     // Keep last 10 turns (5 exchanges) — bumped from 6 to give Gemini more
@@ -443,7 +460,10 @@ GOLD STANDARD shape: "Thank you so much for your time, Puneet. We really hope to
     const currentHasRouting = currentRules.some(r => r?.goto != null)
 
     let nextFieldContext: string
-    if (tapResolvedNext !== null) {
+    if (resuming) {
+      // Re-asking the current question; the WELCOME BACK block drives the reply.
+      nextFieldContext = `The respondent is resuming. Do not extract anything this turn. Simply re-ask the current question: "${currentField.label}".`
+    } else if (tapResolvedNext !== null) {
       // Tap path: route already resolved, tell the model exactly where we're going.
       nextFieldContext = tapResolvedNext >= fields.length
         ? `The user chose "${canonicalOption}". This was their FINAL question. ${closingContext}`
@@ -584,6 +604,13 @@ IMPORTANT: identify which option they chose, then in the SAME reply ask that opt
       sanitizedExtractedValues[currentField.id] = canonicalOption
     }
 
+    // Resume turn: 'Hello' is just the trigger — the respondent hasn't answered
+    // the current question yet. Never extract anything, and keep the index on
+    // the current field so the re-asked question matches the client's progress.
+    if (resuming) {
+      sanitizedExtractedValues = {}
+    }
+
     // Routing decision. LLM's nextFieldIndex is the baseline; on branched
     // forms the deterministic path computation overrides it.
     let nextIndex: number = parsed.nextFieldIndex !== undefined
@@ -615,6 +642,10 @@ IMPORTANT: identify which option they chose, then in the SAME reply ask that opt
     // end the form early with answers silently missing.
     if (!branchingActive && tapResolvedNext === null) {
       nextIndex = Math.min(nextIndex, currentFieldIndex + 1)
+    }
+    // Resume: stay on the re-asked question regardless of what the model said.
+    if (resuming) {
+      nextIndex = currentFieldIndex
     }
 
     // Epic 7: Confidence-based sentiment correction to prevent false positives
