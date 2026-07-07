@@ -504,7 +504,7 @@ export default function FormSession({
   }, [form.id, store, fields, userEmail, killAudio])
 
   // --- VOICE TRANSCRIPT HANDLER ---
-  const { startRecording, stopRecording, primeMic, isRecording, isProcessing, error: recorderError, stream, vadVolume } = useVoiceRecorder(
+  const { startRecording, stopRecording, primeMic, resetStream, isRecording, isProcessing, error: recorderError, stream, vadVolume } = useVoiceRecorder(
     async (transcript, audioBlob, confidence) => {
       // Guard 1: AI is still speaking — ignore, VAD fired too early
       if (isSpeakingRef.current) return
@@ -524,10 +524,15 @@ export default function FormSession({
         // and let the user tap the orb or type to resume.
         if (emptyCaptureStreakRef.current >= MAX_EMPTY_CAPTURES) {
           emptyCaptureStreakRef.current = 0
+          resetStream() // whatever mic we had clearly isn't working — start fresh next time
           setVoiceState('idle')
           isHandlingTranscriptRef.current = false
           return
         }
+        // Two empties in a row is the signature of a mic that was silently
+        // killed (mobile audio-session switch) — it will keep returning silence
+        // forever. Drop the stream so the re-listen below acquires a fresh one.
+        if (emptyCaptureStreakRef.current >= 2) resetStream()
         const lastAiMessage = store.history.filter(m => m.role === 'ai').slice(-1)[0]?.text
         const reprompt = lastAiMessage || "Sorry, didn't quite catch that — could you try again?"
         playSmartAudio(reprompt, () => {
@@ -573,10 +578,19 @@ export default function FormSession({
       }
 
       // Fire converse immediately (parallel with the correction window); the
-      // AI's reply is only played once the pill confirms (drain or explicit).
+      // AI's reply plays once the pill confirms (drain or explicit). CRITICAL:
+      // race the pill against a hard fallback — if the pill's drain timer ever
+      // fails to fire, the reply must NOT be trapped behind an unresolved
+      // promise (that froze the orb in 'speaking' with nothing happening).
+      // The pill drains at 2.5s, so 4s only triggers on a genuinely stuck pill.
       await handleConverseResponse(cleanTranscript, fieldIndex, 'voice', (aiMessage, isComplete) => {
-        pillConfirmed.then(ok => {
+        const gate = Promise.race([
+          pillConfirmed,
+          new Promise<boolean>(r => setTimeout(() => r(true), 4000)),
+        ])
+        gate.then(ok => {
           if (!ok) return // user is correcting — this turn's reply is void
+          pillResolveRef.current = null
           setPendingTranscript(null)
           playSmartAudio(aiMessage, () => {
             isHandlingTranscriptRef.current = false

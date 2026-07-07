@@ -150,6 +150,18 @@ export function useVoiceRecorder(
     return micStream
   }, [])
 
+  // Force a fresh mic on the NEXT recording. Called after a capture comes back
+  // empty — a mic silently killed by the mobile audio-session switch keeps
+  // reporting a live track but delivers silence forever; only re-acquisition
+  // brings it back. (Permission is already granted, so this is normally
+  // promptless.)
+  const resetStream = useCallback(() => {
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach(t => t.stop())
+      micStreamRef.current = null
+    }
+  }, [])
+
   // A freshly-granted mic track can start `muted` and only unmute once the
   // hardware warms up (notably iOS Safari) — recording during that window
   // captures pure silence (the "waveform not moving / said my name but nothing
@@ -456,5 +468,5 @@ export function useVoiceRecorder(
     }
   }, [clearVAD])
 
-  return { startRecording, stopRecording, primeMic, isRecording, isProcessing, error, stream, vadVolume }
+  return { startRecording, stopRecording, primeMic, resetStream, isRecording, isProcessing, error, stream, vadVolume }
 }
