@@ -172,9 +172,13 @@ export function useVoiceRecorder(
           formData.append('formId', formId)
           formData.append('mimeType', finalMime)
 
+          // Hard timeout — without it a stalled mobile connection left this
+          // fetch pending forever, freezing the orb in the 'transcribing'
+          // state with no way out (the reported "stuck orb" at a question).
           const res = await fetch('/api/transcribe', {
             method: 'POST',
             body: formData,
+            signal: AbortSignal.timeout(25000),
           })
 
           const data = await res.json()

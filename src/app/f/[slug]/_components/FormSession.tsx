@@ -210,6 +210,26 @@ export default function FormSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [store.answers])
 
+  // Global anti-freeze watchdog: 'thinking'/'transcribing' should never last
+  // more than ~35s. If it does (a hang no other timeout caught), drop to the
+  // tappable error orb so the respondent always has a way forward. Per-request
+  // timeouts (converse 20s, transcribe 25s) normally recover first; this is the
+  // last line of defense against a permanently stuck orb.
+  useEffect(() => {
+    if (voiceState !== 'thinking' && voiceState !== 'transcribing') return
+    const t = setTimeout(() => {
+      console.warn('[Session] state watchdog fired — recovering from stuck', voiceState)
+      isHandlingTranscriptRef.current = false
+      isSpeakingRef.current = false
+      useConversationStore.getState().removeMessage('__ai_thinking__')
+      store.setIsAiTyping(false)
+      setVoiceState('error')
+      setShowTextHint(true)
+    }, 35000)
+    return () => clearTimeout(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceState])
+
   // Keep voiceStateRef in sync so async callbacks always read the current value
   useEffect(() => { voiceStateRef.current = voiceState }, [voiceState])
 
@@ -1042,6 +1062,22 @@ export default function FormSession({
                     handleInitialSequence()
                   } else if (shouldAutoListen(useConversationStore.getState().currentFieldIndex)) {
                     startRecording()
+                  }
+                }
+                if (voiceState === 'thinking' || voiceState === 'transcribing') {
+                  // Escape hatch: a tap here means "this looks stuck." Cancel
+                  // whatever's in flight and re-open the mic for the current
+                  // question so the user is never trapped by a hung request.
+                  bargeIn()
+                  isHandlingTranscriptRef.current = false
+                  useConversationStore.getState().removeMessage('__ai_thinking__')
+                  const idx = useConversationStore.getState().currentFieldIndex
+                  if (idx >= fields.length) {
+                    store.setMode('review')
+                  } else if (shouldAutoListen(idx)) {
+                    startRecording()
+                  } else {
+                    setVoiceState('idle')
                   }
                 }
               }}

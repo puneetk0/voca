@@ -642,6 +642,14 @@ IMPORTANT: identify which option they chose, then in the SAME reply ask that opt
     // end the form early with answers silently missing.
     if (!branchingActive && tapResolvedNext === null) {
       nextIndex = Math.min(nextIndex, currentFieldIndex + 1)
+      // DATA-LOSS GUARD: never advance a linear form past a question whose
+      // answer wasn't actually captured this turn. Without this, a turn that
+      // extracted nothing (bad transcription, the model just clarifying, a
+      // hallucinated jump) could skip the question — the reported "questions
+      // 6 and 7 weren't recorded." If nothing landed for the current field,
+      // we stay and re-ask it.
+      const gotCurrent = sanitizedExtractedValues[currentField.id] !== undefined
+      if (!gotCurrent) nextIndex = Math.min(nextIndex, currentFieldIndex)
     }
     // Resume: stay on the re-asked question regardless of what the model said.
     if (resuming) {
