@@ -56,6 +56,23 @@ export function useVoiceRecorder(
   const calibrationDoneRef = useRef(false)
   const calibrationTicksRef = useRef(0)
 
+  // Dead-stream detection. On mobile (esp. iOS Safari), playing TTS switches
+  // the audio session and can silently kill/mute the held mic stream — it then
+  // delivers pure digital silence forever and only a FRESH getUserMedia brings
+  // the mic back. We detect "no signal at all" early in a recording and
+  // transparently re-acquire + restart. Guardrails: the check only runs when
+  // the analyser context was running from the start (a suspended context also
+  // reads zeros and must not trigger false recoveries), and at most 2
+  // recoveries per page before surfacing a clear error.
+  const peakEverRef = useRef(0)
+  const deadCheckDoneRef = useRef(false)
+  const ctxRunningEarlyRef = useRef<number | null>(null)
+  const deadStreamRecoveriesRef = useRef(0)
+  const gestureResumeHandlerRef = useRef<(() => void) | null>(null)
+  // Self-reference so the dead-stream recovery can restart recording from
+  // inside the VAD interval without a circular useCallback dependency.
+  const startRecordingRef = useRef<(() => void) | null>(null)
+
   // Keep callback ref stable so startRecording useCallback doesn't need it as dep
   const onTranscriptionRef = useRef(onTranscription)
   useEffect(() => {
@@ -73,6 +90,10 @@ export function useVoiceRecorder(
       }
       vadAudioCtxRef.current = null
     }
+    if (gestureResumeHandlerRef.current) {
+      document.removeEventListener('pointerdown', gestureResumeHandlerRef.current)
+      gestureResumeHandlerRef.current = null
+    }
   }, [])
 
   const stopRecording = useCallback((ignoreTranscription = false) => {
@@ -87,13 +108,34 @@ export function useVoiceRecorder(
     }
   }, [clearVAD])
 
-  // Acquire the mic once, then reuse the SAME live stream for every question.
-  // getUserMedia only prompts on the first call; after that the cached stream
-  // is returned instantly (no prompt, no latency).
+  // Acquire the mic once and reuse it — BUT revalidate before every use.
+  // On mobile, TTS playback switches the audio session and can leave the held
+  // stream muted for good; a muted stream records pure silence. If the cached
+  // track is muted and doesn't come back within ~1.2s, discard it and acquire
+  // a FRESH stream (permission is already granted, so this is promptless).
   const ensureStream = useCallback(async (): Promise<MediaStream> => {
     const existing = micStreamRef.current
-    if (existing && existing.getAudioTracks().some(t => t.readyState === 'live')) {
-      return existing
+    if (existing) {
+      const track = existing.getAudioTracks()[0]
+      if (track && track.readyState === 'live') {
+        if (track.muted) {
+          await new Promise<void>(resolve => {
+            let done = false
+            const finish = () => {
+              if (done) return
+              done = true
+              track.removeEventListener('unmute', finish)
+              resolve()
+            }
+            track.addEventListener('unmute', finish)
+            setTimeout(finish, 1200)
+          })
+        }
+        if (!track.muted) return existing
+        console.warn('[Recorder] held mic stream stayed muted — re-acquiring fresh stream')
+      }
+      existing.getTracks().forEach(t => t.stop())
+      micStreamRef.current = null
     }
     const micStream = await navigator.mediaDevices.getUserMedia({
       audio: {
@@ -243,18 +285,24 @@ export function useVoiceRecorder(
       calibrationSamplesRef.current = []
       calibrationDoneRef.current = false
       calibrationTicksRef.current = 0
+      peakEverRef.current = 0
+      deadCheckDoneRef.current = false
+      ctxRunningEarlyRef.current = null
 
       try {
         const AudioCtxClass = window.AudioContext || (window as any).webkitAudioContext
         if (!AudioCtxClass) throw new Error('No AudioContext')
 
-        // On iOS Safari, AudioContext starts in 'suspended' state.
-        // We resume it here — this is safe because startRecording is always
-        // called from a direct user gesture (button tap).
+        // Recording often starts OUTSIDE a user gesture now (after TTS ends),
+        // where iOS keeps a new AudioContext 'suspended' and resume() doesn't
+        // stick. Try immediately, and also hook the next tap anywhere on the
+        // page (the user taps the orb to stop anyway) as a gesture-context
+        // resume so the meter reliably comes alive.
         const audioCtx = new AudioCtxClass()
-        if (audioCtx.state === 'suspended') {
-          await audioCtx.resume()
-        }
+        const tryResume = () => { if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => { }) }
+        tryResume()
+        document.addEventListener('pointerdown', tryResume)
+        gestureResumeHandlerRef.current = tryResume
         vadAudioCtxRef.current = audioCtx
 
         const analyser = audioCtx.createAnalyser()
@@ -289,6 +337,50 @@ export function useVoiceRecorder(
             sum += amplitude * amplitude
           }
           const currentVol = Math.sqrt(sum / dataArray.length)
+          peakEverRef.current = Math.max(peakEverRef.current, currentVol)
+
+          // Note when the analyser context first reported 'running' — its
+          // readings are only meaningful from then on (a suspended context
+          // reads all-zeros, which must never be mistaken for a dead mic).
+          if (ctxRunningEarlyRef.current === null && audioCtx.state === 'running') {
+            ctxRunningEarlyRef.current = elapsedMsRef.current
+          }
+
+          // DEAD-STREAM WATCHDOG: a live mic always emits at least occasional
+          // ±1 quantization noise across 1.8s of frames; a stream killed by
+          // the mobile audio-session switch reads EXACTLY zero forever and
+          // will never transcribe. Pure digital zero — measured by a context
+          // that was running from (near) the start — means the stream is
+          // dead: void this capture, drop the stream, restart with a fresh
+          // one. Threshold is intentionally near-zero so noise suppression in
+          // a dead-quiet room can never false-trigger.
+          if (
+            !deadCheckDoneRef.current &&
+            elapsedMsRef.current >= 1760 &&
+            ctxRunningEarlyRef.current !== null &&
+            ctxRunningEarlyRef.current <= 400
+          ) {
+            deadCheckDoneRef.current = true
+            if (peakEverRef.current < 0.05) {
+              if (deadStreamRecoveriesRef.current < 2) {
+                deadStreamRecoveriesRef.current++
+                console.warn('[VAD] mic stream delivering digital silence — re-acquiring and restarting')
+                stopRecording(true) // void the silent capture
+                if (micStreamRef.current) {
+                  micStreamRef.current.getTracks().forEach(t => t.stop())
+                  micStreamRef.current = null
+                }
+                setTimeout(() => startRecordingRef.current?.(), 60)
+              } else {
+                setError('Your microphone seems muted. Check the mic switch or permissions — or just type your answer below.')
+                stopRecording(true)
+              }
+              return
+            }
+            // Healthy signal observed — this page's mic works; stop counting
+            // earlier recoveries against the cap.
+            deadStreamRecoveriesRef.current = 0
+          }
 
           // Phase 1: Calibrate noise floor for first NOISE_CALIBRATION_MS.
           // MEDIAN of ambient samples — a single cough/click during calibration
@@ -350,6 +442,9 @@ export function useVoiceRecorder(
       isStartingRef.current = false
     }
   }, [formId, clearVAD, ensureStream, waitUntilAudible])
+
+  // Keep the self-reference fresh for the dead-stream recovery restart.
+  useEffect(() => { startRecordingRef.current = startRecording }, [startRecording])
 
   // Cleanup on unmount
   useEffect(() => {
