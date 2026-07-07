@@ -21,6 +21,9 @@ export default function Waveform({ stream, isActive, color = '#000000' }: Wavefo
     if (!AudioCtxClass) return
 
     const ctx = new AudioCtxClass() as AudioContext
+    // Browsers start an AudioContext 'suspended' until a gesture — resume it or
+    // the analyser reports zero and the bars sit flat even while the mic works.
+    if (ctx.state === 'suspended') ctx.resume().catch(() => {})
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 256          // 128 frequency bins
     analyser.smoothingTimeConstant = 0.5

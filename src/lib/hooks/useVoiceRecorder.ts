@@ -108,9 +108,33 @@ export function useVoiceRecorder(
     return micStream
   }, [])
 
+  // A freshly-granted mic track can start `muted` and only unmute once the
+  // hardware warms up (notably iOS Safari) — recording during that window
+  // captures pure silence (the "waveform not moving / said my name but nothing
+  // recorded, reload fixed it" report). Wait for real audio before recording.
+  const waitUntilAudible = useCallback(async (stream: MediaStream) => {
+    const track = stream.getAudioTracks()[0]
+    if (!track || !track.muted) return
+    await new Promise<void>(resolve => {
+      let done = false
+      const finish = () => {
+        if (done) return
+        done = true
+        track.removeEventListener('unmute', finish)
+        resolve()
+      }
+      track.addEventListener('unmute', finish)
+      setTimeout(finish, 2500) // never block forever
+    })
+  }, [])
+
   // Prime the mic ahead of the first question (single prompt at session start).
-  // Throws on denial so the caller can show a helpful message.
-  const primeMic = useCallback(async () => { await ensureStream() }, [ensureStream])
+  // Throws on denial so the caller can show a helpful message. Kicks off the
+  // hardware warm-up early so it's audible by the time recording begins.
+  const primeMic = useCallback(async () => {
+    const s = await ensureStream()
+    waitUntilAudible(s).catch(() => {})
+  }, [ensureStream, waitUntilAudible])
 
   const startRecording = useCallback(async () => {
     // Reentrancy guard — a second call while one recorder is starting or live
@@ -121,6 +145,8 @@ export function useVoiceRecorder(
 
     try {
       const micStream = await ensureStream()
+      // Don't record into a still-warming (muted) mic — capture silence otherwise.
+      await waitUntilAudible(micStream)
 
       // MIME type detection — critical for iOS Safari which only supports audio/mp4
       // Test in order of quality preference
@@ -323,7 +349,7 @@ export function useVoiceRecorder(
     } finally {
       isStartingRef.current = false
     }
-  }, [formId, clearVAD, ensureStream])
+  }, [formId, clearVAD, ensureStream, waitUntilAudible])
 
   // Cleanup on unmount
   useEffect(() => {
