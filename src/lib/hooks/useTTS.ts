@@ -43,6 +43,10 @@ export function useTTS(
   // barge-ins during browser speech falsely latched captions mode.
   const generationRef = useRef(0)
 
+  // 1-entry TTS synthesis cache (see playSmartAudio) — avoids paying Sarvam
+  // twice for the same text (mobile autoplay replay, empty-capture reprompt).
+  const lastTtsRef = useRef<{ text: string; lang: 'hi' | 'en'; src: string } | null>(null)
+
   // Captions mode: after repeated total audio failures we stop trying to play
   // sound and instead give a silent "reading window" so the loop continues.
   const ttsFailStreakRef = useRef(0)
@@ -228,14 +232,28 @@ export function useTTS(
     }
 
     try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ formId, text, language: languageRef.current }),
-        signal: AbortSignal.timeout(TTS_FETCH_TIMEOUT_MS),
-      })
-      const data = await res.json()
-      if (data.fallback || data.error || !data.audioContent) throw new Error('fallback')
+      // 1-entry synthesis cache. Sarvam bills per character, so we must never
+      // pay to synthesize the SAME text twice in a row. This kills two real
+      // wastes: (a) on mobile the opener is fetched once (autoplay-blocked),
+      // then replayed on the unlock tap — same text; (b) an empty-capture
+      // reprompt re-speaks the last question — same text. Both now reuse the
+      // cached audio, same quality, zero extra Sarvam calls.
+      let src = lastTtsRef.current && lastTtsRef.current.text === text && lastTtsRef.current.lang === languageRef.current
+        ? lastTtsRef.current.src
+        : null
+      if (!src) {
+        const res = await fetch('/api/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ formId, text, language: languageRef.current }),
+          signal: AbortSignal.timeout(TTS_FETCH_TIMEOUT_MS),
+        })
+        const data = await res.json()
+        if (data.fallback || data.error || !data.audioContent) throw new Error('fallback')
+        const mimeType = data.format === 'wav' ? 'audio/wav' : 'audio/mpeg'
+        src = `data:${mimeType};base64,${data.audioContent}`
+        lastTtsRef.current = { text, lang: languageRef.current, src }
+      }
 
       if (!audioRef.current) audioRef.current = new Audio()
       const audio = audioRef.current
@@ -243,8 +261,7 @@ export function useTTS(
       // rate (this manifested as the voice suddenly "speaking slow").
       audio.playbackRate = 1
       audio.defaultPlaybackRate = 1
-      const mimeType = data.format === 'wav' ? 'audio/wav' : 'audio/mpeg'
-      audio.src = `data:${mimeType};base64,${data.audioContent}`
+      audio.src = src
       audio.load()
       audio.onended = () => { ttsFailStreakRef.current = 0; finalize() }
       audio.onerror = () => { console.warn('[TTS] playback error, finalizing'); finalize() }

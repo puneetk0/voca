@@ -13,9 +13,10 @@ const FLOOR_MAX = 24               // never let a noisy calibration eat quiet sp
 // (shows a flat waveform). Metering only — it no longer ends the turn.
 const PEAK_SILENCE_RATIO = 0.25
 // Single failsafe so a walked-away mic can't record (and upload) forever.
-// Generous on purpose — real answers finish well within this; only a truly
-// abandoned session hits it.
-const MAX_RECORDING_MS = 180000    // 3 min hard cap → stop and transcribe what we have
+// 90s comfortably covers any real spoken answer while capping the Sarvam STT
+// bill (billed by audio length) for an abandoned or dead-open mic — 3 min was
+// needlessly expensive.
+const MAX_RECORDING_MS = 90000     // 90s hard cap → stop and transcribe what we have
 
 export function useVoiceRecorder(
   onTranscription: (text: string, audioBlob: Blob, confidence: number) => void,
